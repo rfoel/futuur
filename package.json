@@ -1,0 +1,33 @@
+{
+  "name": "futuur",
+  "version": "0.0.0",
+  "description": "A TypeScript SDK for interacting with the Futuur API. This SDK provides a simple and type-safe way to interact with all Futuur API endpoints.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "format": "prettier --write \"src/**/*.ts\""
+  },
+  "files": [
+    "dist"
+  ],
+  "keywords": [
+    "api",
+    "futuur",
+    "typescript",
+    "prediction"
+  ],
+  "author": "Rafael Franco",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.7.9",
+    "crypto-js": "^4.2.0"
+  },
+  "devDependencies": {
+    "@types/crypto-js": "^4.2.2",
+    "@types/node": "^22.13.1",
+    "prettier": "^3.4.2",
+    "semantic-release": "^24.2.1",
+    "typescript": "^5.7.3"
+  }
+}
