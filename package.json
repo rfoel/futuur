@@ -4,6 +4,10 @@
   "description": "A TypeScript SDK for interacting with the Futuur API. This SDK provides a simple and type-safe way to interact with all Futuur API endpoints.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rfoel/futuur.git"
+  },
   "scripts": {
     "build": "tsc",
     "format": "prettier --write \"src/**/*.ts\""
