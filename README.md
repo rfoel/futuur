@@ -13,7 +13,7 @@ npm install futuur
 ### Initialize the SDK
 
 ```typescript
-import { Futuur } from 'futuur-sdk';
+import { Futuur } from 'futuur';
 
 const sdk = new Futuur({
   publicKey: 'your_public_key',
