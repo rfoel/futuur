@@ -1,6 +1,10 @@
 # Futuur SDK
 
-A TypeScript SDK for interacting with the Futuur API. This SDK provides a simple and type-safe way to interact with all Futuur API endpoints.
+[![npm version](https://img.shields.io/npm/v/futuur.svg)](https://www.npmjs.com/package/futuur)
+
+TypeScript SDK for the [Futuur API](https://docs.futuur.com) (v2). Type-safe access to events, markets, orders, and wagers.
+
+Full API reference: [docs.futuur.com](https://docs.futuur.com).
 
 ## Installation
 
@@ -10,165 +14,142 @@ npm install futuur
 
 ## Usage
 
-### Initialize the SDK
+### Initialize
 
 ```typescript
-import { Futuur } from 'futuur';
+import { Futuur } from "futuur";
 
 const sdk = new Futuur({
-  publicKey: 'your_public_key',
-  privateKey: 'your_private_key',
-  timeout: 10000 // optional, defaults to 10000ms
+  publicKey: process.env.FUTUUR_PUBLIC_KEY!,
+  privateKey: process.env.FUTUUR_PRIVATE_KEY!,
+  timeout: 10000, // optional, default 10000ms
 });
 ```
 
-### Markets
+### Account
 
-Get list of markets:
 ```typescript
-const markets = await sdk.marketList({
-  page: 1,
-  per_page: 20
+const me = await sdk.me();
+const ranking = await sdk.ranking();
+```
+
+### Events
+
+```typescript
+const events = await sdk.listEvents({
+  currency_mode: "play_money",
+  live: true,
+  limit: 20,
 });
-```
 
-Get specific market:
-```typescript
-const market = await sdk.marketDetail('market_id');
-```
+const event = await sdk.getEvent(1023);
+const actions = await sdk.getEventActions(1023, { my_bets: true });
 
-Get related markets:
-```typescript
-const relatedMarkets = await sdk.relatedMarkets('market_id');
-```
-
-Suggest a market:
-```typescript
-const suggestion = await sdk.suggestMarket({
-  title: 'Market Title',
-  description: 'Market Description'
+const book = await sdk.getOrderBook(1023, {
+  currency_mode: "play_money",
+  market: 4567,
+  position: "l",
 });
-```
 
-### Categories
-
-Get all categories:
-```typescript
-const categories = await sdk.categoryList();
-```
-
-Get specific category:
-```typescript
-const category = await sdk.categoryDetail('category_id');
-```
-
-Get root categories:
-```typescript
-const rootCategories = await sdk.rootCategories();
-```
-
-Get root categories with main children:
-```typescript
-const categoriesWithChildren = await sdk.rootCategoriesAndMainChildren();
-```
-
-### Betting
-
-Place a bet:
-```typescript
-const bet = await sdk.purchase({
-  outcome: 123456,
-  shares: 100
+const history = await sdk.getPriceHistory(1023, {
+  currency_mode: "play_money",
+  time_interval: "week",
 });
+
+const eventWagers = await sdk.getEventWagers(1023, { active: true });
 ```
 
-Get betting list:
+### Wagers
+
 ```typescript
-const bets = await sdk.bettingList({
-  page: 1,
-  per_page: 20
+const wagers = await sdk.listWagers({ active: true, limit: 50 });
+const wager = await sdk.getWager(98765);
+```
+
+### Orders
+
+```typescript
+const open = await sdk.listOrders({ status: "open", side: "bid" });
+
+// Limit order
+const limit = await sdk.createOrder({
+  market: 4567,
+  side: "bid",
+  currency: "USDC",
+  price: 0.62,
+  shares: 100,
+  position: "l",
 });
-```
 
-Get specific bet:
-```typescript
-const bet = await sdk.betDetail('bet_id');
-```
-
-Get partial amount on sell:
-```typescript
-const amount = await sdk.getPartialAmountOnSell('bet_id', {
-  shares: 50
+// Market order (price = null)
+const market = await sdk.createOrder({
+  market: 4567,
+  side: "bid",
+  currency: "USDC",
+  price: null,
+  amount: 50,
 });
-```
 
-Get current rates:
-```typescript
-const rates = await sdk.currentRates();
-```
-
-### User Information
-
-Get user information:
-```typescript
-const userInfo = await sdk.me();
-```
-
-## Error Handling
-
-The SDK throws errors with detailed information about the failed request. It's recommended to wrap API calls in try-catch blocks:
-
-```typescript
-try {
-  const result = await sdk.purchase({
-    outcome: 123456,
-    shares: 100
-  });
-  console.log('Success:', result);
-} catch (error) {
-  console.error('Operation failed:', error);
-}
+await sdk.cancelOrder(10482);
 ```
 
 ## API Reference
 
 ### Constructor Options
 
-| Option | Type | Required | Default | Description |
-|--------|------|----------|---------|-------------|
-| publicKey | string | Yes | - | Your Futuur API public key |
-| privateKey | string | Yes | - | Your Futuur API private key |
-| timeout | number | No | 10000 | Request timeout in milliseconds |
+| Option       | Type   | Required | Default                     |
+| ------------ | ------ | -------- | --------------------------- |
+| `publicKey`  | string | yes      | —                           |
+| `privateKey` | string | yes      | —                           |
+| `timeout`    | number | no       | `10000`                     |
+| `baseUrl`    | string | no       | `https://api.futuur.com`    |
 
-### Available Methods
+### Methods
 
-| Method | Description |
-|--------|-------------|
-| `me()` | Get user information |
-| `categoryList(params?)` | Get list of categories |
-| `categoryDetail(id)` | Get specific category details |
-| `rootCategories()` | Get root categories |
-| `rootCategoriesAndMainChildren(params?)` | Get root categories with main children |
-| `marketList(params?)` | Get list of markets |
-| `marketDetail(id)` | Get specific market details |
-| `relatedMarkets(id)` | Get related markets |
-| `suggestMarket(params)` | Suggest a new market |
-| `bettingList(params)` | Get list of bets |
-| `betDetail(id)` | Get specific bet details |
-| `getPartialAmountOnSell(id, params?)` | Get partial amount on sell |
-| `currentRates()` | Get current rates |
-| `purchase(body)` | Place a bet |
+| Method                              | Endpoint                            |
+| ----------------------------------- | ----------------------------------- |
+| `me()`                              | `GET /me/`                          |
+| `ranking()`                         | `GET /me/ranking/`                  |
+| `listEvents(params?)`               | `GET /events/`                      |
+| `getEvent(id)`                      | `GET /events/{id}/`                 |
+| `getEventActions(id, params?)`      | `GET /events/{id}/actions/`         |
+| `getOrderBook(id, params)`          | `GET /events/{id}/order_book/`      |
+| `getPriceHistory(id, params)`       | `GET /events/{id}/price_history/`   |
+| `getEventWagers(id, params?)`       | `GET /events/{id}/wagers/`          |
+| `listWagers(params?)`               | `GET /wagers/`                      |
+| `getWager(id)`                      | `GET /wagers/{id}/`                 |
+| `listOrders(params?)`               | `GET /orders/`                      |
+| `createOrder(body)`                 | `POST /orders/`                     |
+| `cancelOrder(id)`                   | `PATCH /orders/{id}/cancel/`        |
 
 ## Authentication
 
-The SDK automatically handles authentication using HMAC signatures. Each request is signed using your private key and includes:
-- Your public key
-- A timestamp
-- An HMAC signature
+The SDK signs every request with HMAC-SHA512 using your private key. Request headers `Key`, `Timestamp`, `HMAC` are added automatically. Never commit your private key — load it from env vars or a secrets manager.
+
+## Error Handling
+
+```typescript
+try {
+  await sdk.createOrder({
+    market: 4567,
+    side: "bid",
+    currency: "USDC",
+    price: 0.62,
+    shares: 100,
+  });
+} catch (err) {
+  // axios error — inspect err.response?.data for API error code
+  console.error(err);
+}
+```
+
+Common API errors: `UserNotEnoughBalance`, `MarketClosed`, `OrderBookConflictingOrders`, `InvalidShares`.
+
+## Migration from v1
+
+v2 is a breaking rewrite around the new resource model (events / markets / orders / wagers). Removed: `marketList`, `marketDetail`, `relatedMarkets`, `suggestMarket`, `categoryList`, `categoryDetail`, `rootCategories`, `rootCategoriesAndMainChildren`, `bettingList`, `betDetail`, `getPartialAmountOnSell`, `currentRates`, `purchase`, `sell`. Trading now goes through `createOrder` / `cancelOrder`; positions are read via `listWagers` / `getWager`.
 
 ## Development
-
-### Building
 
 ```bash
 npm run build
@@ -178,19 +159,6 @@ npm run build
 
 MIT
 
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## Support
-
-If you encounter any issues or have questions, please file an issue on the GitHub repository.
-
-## Security
-
-Never commit or share your private key. Always use environment variables or secure secret management systems to handle sensitive credentials.
-
 ## Disclaimer
 
-This is an unofficial SDK and is not affiliated with, maintained by, or in any way officially connected with Futuur.
-```
+Unofficial SDK. Not affiliated with Futuur.

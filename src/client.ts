@@ -1,311 +1,204 @@
-import axios, { AxiosHeaders, AxiosInstance, AxiosRequestConfig } from "axios";
+import axios, { AxiosHeaders, AxiosInstance } from "axios";
 import CryptoJS from "crypto-js";
 
 import {
-  BetDetailResponse,
-  BettingListParams,
-  BettingListResponse,
-  CategoryDetailResponse,
-  CategoryListResponse,
-  CurrentRatesResponse,
-  GetPartialAmountOnSellParams,
-  GetPartialAmountOnSellResponse,
-  MarketDetailResponse,
-  MarketListParams,
-  MarketListResponse,
+  CreateOrderBody,
+  CreateOrderResponse,
+  EventActionsParams,
+  EventActionsResponse,
+  EventDetailResponse,
+  EventListParams,
+  EventListResponse,
+  EventWagersParams,
+  EventWagersResponse,
   MeResponse,
-  PaginationParams,
-  PurchaseBody,
-  PurchaseResponse,
-  RelatedMarketsResponse,
-  RootCategoriesAndMainChildrenParams,
-  RootCategoriesAndMainChildrenResponse,
-  RootCategoriesResponse,
-  SellBody,
-  SellResponse,
-  SuggestMarketParams,
-  SuggestMarketResponse,
+  OrderBookParams,
+  OrderBookResponse,
+  OrderListParams,
+  OrderListResponse,
+  PriceHistoryParams,
+  PriceHistoryResponse,
+  RankingResponse,
+  WagerDetailResponse,
+  WagerListParams,
+  WagerListResponse,
 } from "./types";
+
+export interface FutuurConfig {
+  publicKey: string;
+  privateKey: string;
+  /** @default 10000 */
+  timeout?: number;
+  /** @default "https://api.futuur.com" */
+  baseUrl?: string;
+}
 
 export class Futuur {
   private client: AxiosInstance;
-  private static readonly BASE_URL = "https://api.futuur.com/api/v1";
+  private static readonly DEFAULT_BASE_URL = "https://api.futuur.com";
   private readonly publicKey: string;
   private readonly privateKey: string;
 
-  constructor(config: {
-    publicKey: string;
-    privateKey: string;
-    timeout?: number;
-  }) {
-    const { publicKey, privateKey, timeout } = config;
-    this.publicKey = publicKey;
-    this.privateKey = privateKey;
+  constructor(config: FutuurConfig) {
+    this.publicKey = config.publicKey;
+    this.privateKey = config.privateKey;
 
     this.client = axios.create({
-      baseURL: Futuur.BASE_URL,
-      timeout: timeout || 10000,
-      headers: new AxiosHeaders({
-        "Content-Type": "application/json",
-      }),
+      baseURL: config.baseUrl || Futuur.DEFAULT_BASE_URL,
+      timeout: config.timeout || 10000,
+      headers: new AxiosHeaders({ "Content-Type": "application/json" }),
     });
 
-    this.client.interceptors.request.use((config) => {
+    this.client.interceptors.request.use((req) => {
       const timestamp = Math.floor(Date.now() / 1000);
-
-      // Combine parameters
-      const params: Record<string, any> = {
+      const params: Record<string, unknown> = {
         Key: this.publicKey,
         Timestamp: timestamp,
       };
 
-      // Add query parameters if present
-      if (config.params) {
-        Object.assign(params, config.params);
+      if (req.params) {
+        Object.assign(params, req.params);
+      }
+      if (req.data) {
+        const body =
+          typeof req.data === "string" ? JSON.parse(req.data) : req.data;
+        Object.assign(params, body);
       }
 
-      // Add body parameters if present
-      if (config.data) {
-        const bodyParams =
-          typeof config.data === "string"
-            ? JSON.parse(config.data)
-            : config.data;
-        Object.assign(params, bodyParams);
-      }
+      const hmac = this.buildSignature(params);
 
-      // Get signature data
-      const signatureData = this.buildSignature(params);
-
-      // Set headers
-      const newHeaders = new AxiosHeaders(config.headers);
-      newHeaders.set("Key", this.publicKey);
-      newHeaders.set("Timestamp", signatureData.Timestamp.toString());
-      newHeaders.set("HMAC", signatureData.hmac);
-
-      config.headers = newHeaders;
-      return config;
+      const headers = new AxiosHeaders(req.headers);
+      headers.set("Key", this.publicKey);
+      headers.set("Timestamp", timestamp.toString());
+      headers.set("HMAC", hmac);
+      req.headers = headers;
+      return req;
     });
-
-    this.client.interceptors.response.use(
-      (response) => response,
-      (error) => {
-        console.error("Request failed:", {
-          config: error.config,
-          response: error.response?.data,
-        });
-        return Promise.reject(error);
-      },
-    );
   }
 
-  private buildSignature(params: Record<string, any>): {
-    hmac: string;
-    Timestamp: number;
-  } {
-    // Convert all values to strings and remove undefined/null
-    const stringParams = Object.entries(params).reduce(
-      (acc, [key, value]) => {
-        if (value !== undefined && value !== null) {
-          acc[key] = value.toString();
-        }
-        return acc;
-      },
-      {} as Record<string, string>,
-    );
+  private buildSignature(params: Record<string, unknown>): string {
+    const flat: Record<string, string> = {};
+    for (const [k, v] of Object.entries(params)) {
+      if (v === undefined || v === null) continue;
+      flat[k] = Array.isArray(v) ? v.join(",") : String(v);
+    }
 
-    // Sort parameters alphabetically
-    const sortedParams = Object.keys(stringParams)
+    const paramString = Object.keys(flat)
       .sort()
-      .reduce(
-        (acc, key) => {
-          acc[key] = stringParams[key];
-          return acc;
-        },
-        {} as Record<string, string>,
-      );
-
-    // Create parameter string with URL encoding
-    const paramString = Object.entries(sortedParams)
-      .map(
-        ([key, value]) =>
-          `${encodeURIComponent(key)}=${encodeURIComponent(value)}`,
-      )
+      .map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(flat[k])}`)
       .join("&");
 
-    // Create HMAC signature
-    const hmac = CryptoJS.HmacSHA512(paramString, this.privateKey).toString(
+    return CryptoJS.HmacSHA512(paramString, this.privateKey).toString(
       CryptoJS.enc.Hex,
     );
-
-    return {
-      hmac,
-      Timestamp: params.Timestamp,
-    };
   }
 
-  /**
-   * The endpoint returns information about a user.
-   */
+  /* ── Me ───────────────────────────────────────────────────────────── */
+
+  /** Authenticated account details and balances. */
   async me(): Promise<MeResponse> {
-    const { data } = await this.client.get("/me");
+    const { data } = await this.client.get("/me/");
     return data;
   }
 
-  /**
-   * Return list of categories.
-   */
-  async categoryList(params?: PaginationParams): Promise<CategoryListResponse> {
-    const { data } = await this.client.get("/categories", { params });
+  /** Current leaderboard ranking position. */
+  async ranking(): Promise<RankingResponse> {
+    const { data } = await this.client.get("/me/ranking/");
     return data;
   }
 
-  /**
-   * Return category detail.
-   */
-  async categoryDetail(
-    /**
-     * A unique integer value identifying this category.
-     */
+  /* ── Events ───────────────────────────────────────────────────────── */
+
+  /** Paginated list of prediction market events. */
+  async listEvents(params?: EventListParams): Promise<EventListResponse> {
+    const { data } = await this.client.get("/events/", { params });
+    return data;
+  }
+
+  /** Detailed information for a single event. */
+  async getEvent(id: string | number): Promise<EventDetailResponse> {
+    const { data } = await this.client.get(`/events/${id}/`);
+    return data;
+  }
+
+  /** Bet activity feed for an event. */
+  async getEventActions(
     id: string | number,
-  ): Promise<CategoryDetailResponse> {
-    const { data } = await this.client.get(`/categories/${id}`);
+    params?: EventActionsParams,
+  ): Promise<EventActionsResponse> {
+    const { data } = await this.client.get(`/events/${id}/actions/`, {
+      params,
+    });
     return data;
   }
 
-  /**
-   * Return root categories
-   */
-  async rootCategories(): Promise<RootCategoriesResponse> {
-    const { data } = await this.client.get("/categories/root");
-    return data;
-  }
-
-  /**
-   * Return root categories
-   */
-  async rootCategoriesAndMainChildren(
-    params?: RootCategoriesAndMainChildrenParams,
-  ): Promise<RootCategoriesAndMainChildrenResponse> {
-    const { data } = await this.client.get(
-      "/categories/root_and_main_children",
-      { params },
-    );
-    return data;
-  }
-
-  /**
-   * Return list of markets.
-   */
-  async marketList(params?: MarketListParams): Promise<MarketListResponse> {
-    const { data } = await this.client.get("/markets", { params });
-    return data;
-  }
-
-  /**
-   * Return market information from its ID.
-   */
-  async marketDetail(
-    /**
-     * A unique integer value identifying this market.
-     */
+  /** Aggregated order book (bids/asks) for an event's market. */
+  async getOrderBook(
     id: string | number,
-  ): Promise<MarketDetailResponse> {
-    const { data } = await this.client.get(`/markets/${id}`);
+    params: OrderBookParams,
+  ): Promise<OrderBookResponse> {
+    const { data } = await this.client.get(`/events/${id}/order_book/`, {
+      params,
+    });
     return data;
   }
 
-  /**
-   * Return related markets of a market.
-   */
-  async relatedMarkets(
-    /**
-     * A unique integer value identifying this market.
-     */
+  /** Historical price data for an event over a time interval. */
+  async getPriceHistory(
     id: string | number,
-  ): Promise<RelatedMarketsResponse> {
-    const { data } = await this.client.get(`/markets/${id}/related_markets`);
+    params: PriceHistoryParams,
+  ): Promise<PriceHistoryResponse> {
+    const { data } = await this.client.get(`/events/${id}/price_history/`, {
+      params,
+    });
     return data;
   }
 
-  /**
-   * Suggest a market.
-   */
-  async suggestMarket(
-    params: SuggestMarketParams,
-  ): Promise<SuggestMarketResponse> {
-    const { data } = await this.client.post(
-      "/markets/suggest_market",
-      undefined,
-      { params },
-    );
-    return data;
-  }
-
-  /**
-   * Return a list of all your bets.
-   */
-  async bettingList(params: BettingListParams): Promise<BettingListResponse> {
-    const { data } = await this.client.get("/bets", { params });
-    return data;
-  }
-
-  /**
-   * Return information on your bet, on a given market, for an outcome and currency.
-   */
-  async betDetail(
-    /**
-     * A unique integer value identifying this wager.
-     */
+  /** Wagers placed on a specific event. */
+  async getEventWagers(
     id: string | number,
-  ): Promise<BetDetailResponse> {
-    const { data } = await this.client.get(`/bets/${id}`);
+    params?: EventWagersParams,
+  ): Promise<EventWagersResponse> {
+    const { data } = await this.client.get(`/events/${id}/wagers/`, {
+      params,
+    });
+    return data;
+  }
+
+  /* ── Wagers ───────────────────────────────────────────────────────── */
+
+  /** Paginated wagers with user and activity filters. */
+  async listWagers(params?: WagerListParams): Promise<WagerListResponse> {
+    const { data } = await this.client.get("/wagers/", { params });
+    return data;
+  }
+
+  /** Detailed wager information by ID. */
+  async getWager(id: string | number): Promise<WagerDetailResponse> {
+    const { data } = await this.client.get(`/wagers/${id}/`);
+    return data;
+  }
+
+  /* ── Orders ───────────────────────────────────────────────────────── */
+
+  /** Paginated limit orders. */
+  async listOrders(params?: OrderListParams): Promise<OrderListResponse> {
+    const { data } = await this.client.get("/orders/", { params });
+    return data;
+  }
+
+  /** Place a limit (price 0–1) or market (price null) order. */
+  async createOrder(body: CreateOrderBody): Promise<CreateOrderResponse> {
+    const { data } = await this.client.post("/orders/", body);
     return data;
   }
 
   /**
-   * Return information on your bet, on a given market, for an outcome and currency.
+   * Cancel an open limit order.
+   * Only `open` or `partial_filled` orders can be canceled.
+   * Returns 204 No Content on success.
    */
-  async getPartialAmountOnSell(
-    /**
-     * A unique integer value identifying this wager.
-     */
-    id: string | number,
-    params?: GetPartialAmountOnSellParams,
-  ): Promise<GetPartialAmountOnSellResponse> {
-    const { data } = await this.client.get(
-      `/bets/${id}/get_partial_amount_on_sell`,
-      { params },
-    );
-    return data;
-  }
-
-  /**
-   * Returns a dict with latest rates. Each dict gives rates for currency field.
-   */
-  async currentRates(): Promise<CurrentRatesResponse> {
-    const { data } = await this.client.get("/bets/rates");
-    return data;
-  }
-
-  /**
-   * Bet on a market by purchasing an outcome position.
-   */
-  async purchase(body: PurchaseBody): Promise<PurchaseResponse> {
-    const { data } = await this.client.post("/bets/", body);
-    return data;
-  }
-
-  /**
-   * Sell your entire position (previously purchased) on an outcome for a given currency.
-   */
-  async sell(
-    /**
-     * A unique integer value identifying this wager.
-     */
-    id: string | number,
-    body?: SellBody,
-  ): Promise<SellResponse> {
-    const { data } = await this.client.patch(`/bets/${id}`, body);
-    return data;
+  async cancelOrder(id: string | number): Promise<void> {
+    await this.client.patch(`/orders/${id}/cancel/`);
   }
 }

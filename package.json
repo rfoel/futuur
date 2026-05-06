@@ -1,6 +1,6 @@
 {
   "name": "futuur",
-  "version": "0.0.0",
+  "version": "1.0.3",
   "description": "A TypeScript SDK for interacting with the Futuur API. This SDK provides a simple and type-safe way to interact with all Futuur API endpoints.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -10,7 +10,9 @@
   },
   "scripts": {
     "build": "tsc",
-    "format": "prettier --write \"src/**/*.ts\""
+    "format": "prettier --write \"src/**/*.ts\"",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "files": [
     "dist"
@@ -28,10 +30,13 @@
     "crypto-js": "^4.2.0"
   },
   "devDependencies": {
+    "@semantic-release/git": "^10.0.1",
     "@types/crypto-js": "^4.2.2",
     "@types/node": "^22.13.1",
+    "nock": "^14.0.14",
     "prettier": "^3.4.2",
     "semantic-release": "^24.2.1",
-    "typescript": "^5.7.3"
+    "typescript": "^5.7.3",
+    "vitest": "^4.1.5"
   }
 }
