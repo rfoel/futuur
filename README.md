@@ -102,11 +102,15 @@ const market = await sdk.createOrder({
   side: "bid",
   currency: "USDC",
   price: null,
-  amount: 50,
+  shares: 60,
 });
 
 await sdk.cancelOrder(10482);
 ```
+
+`shares` is required on both forms. A body that carries only `amount` is rejected with
+`KeyError: 'shares'`, so size the order yourself — walk `getOrderBook` if you want to
+convert a budget into shares at a price you know will fill.
 
 Pass an idempotency key to make a retry safe:
 
@@ -218,6 +222,8 @@ pagination.next; // URL of the next page, or null
 The SDK signs every request with HMAC-SHA512 using your private key. Request headers `Key`, `Timestamp`, `HMAC` are added automatically. Never commit your private key — load it from env vars or a secrets manager.
 
 Query params (GET) and body params (POST) are folded into the signed parameter set, sorted alphabetically and URL-encoded. Nested bodies — the `orders` array on the batch endpoints — are serialized as JSON before signing.
+
+The encoding has to match the API's, which is Python's `urlencode`, so a space signs as `+` and `!'()*` are escaped. Null handling differs by location: a null query param never reaches the wire and is left out of the signature, while a null body param does reach the wire and signs as `None`. Getting either wrong yields `authentication_failed` — a 401 that reads like a credential problem but is really a signature one. `me()` takes no params, so if it succeeds while a parameterised call fails, the credentials are fine.
 
 Rate limits are 2,000 requests/minute and 30,000/day per account; identical POSTs within 1 second are rejected as duplicates.
 
