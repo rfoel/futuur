@@ -13,15 +13,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      # Must come before setup-node so that `cache: "pnpm"` can find pnpm.
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v7
         with:
           node-version: 24
           registry-url: "https://registry.npmjs.org"
-          cache: "npm"
+          cache: "pnpm"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - run: pnpm run build
+      # semantic-release publishes through the npm CLI regardless of the package
+      # manager used to install, and trusted publishing needs a current npm.
       - run: npm install -g npm@latest
-      - run: npm ci
-      - run: npm test
-      - run: npm run build
-      - run: npx semantic-release
+      - run: pnpm exec semantic-release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -42,5 +42,6 @@
     "semantic-release": "^25.0.8",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"
-  }
+  },
+  "packageManager": "pnpm@11.8.0"
 }
