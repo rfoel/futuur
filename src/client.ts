@@ -72,19 +72,30 @@ export class Futuur {
 
     this.client.interceptors.request.use((req) => {
       const timestamp = Math.floor(Date.now() / 1000);
-      const params: Record<string, unknown> = {
+      const signed: Record<string, string> = {
         Key: this.publicKey,
-        Timestamp: timestamp,
+        Timestamp: timestamp.toString(),
       };
 
-      if (req.params) {
-        Object.assign(params, req.params);
-      }
-      if (req.data) {
-        Object.assign(params, this.bodyParams(req.data));
+      // A null query param never reaches the wire, so the server cannot see it
+      // and it has to stay out of the signature.
+      for (const [key, value] of Object.entries(req.params ?? {})) {
+        if (value === undefined || value === null) continue;
+        signed[key] = this.signatureValue(value);
       }
 
-      const hmac = this.buildSignature(params);
+      // A null body param does reach the wire — JSON.stringify keeps it — so the
+      // server folds it into its own signature as Python renders it: `None`.
+      // Dropping it here is what made `createOrder({ price: null })` fail with
+      // `authentication_failed`.
+      if (req.data) {
+        for (const [key, value] of Object.entries(this.bodyParams(req.data))) {
+          if (value === undefined) continue;
+          signed[key] = value === null ? "None" : this.signatureValue(value);
+        }
+      }
+
+      const hmac = this.buildSignature(signed);
 
       const headers = new AxiosHeaders(req.headers);
       headers.set("Key", this.publicKey);
@@ -101,9 +112,25 @@ export class Futuur {
       .filter(([, v]) => v !== undefined && v !== null)
       .map(
         ([k, v]) =>
-          `${encodeURIComponent(k)}=${encodeURIComponent(this.signatureValue(v))}`,
+          `${Futuur.quotePlus(k)}=${Futuur.quotePlus(this.signatureValue(v))}`,
       )
       .join("&");
+  }
+
+  /**
+   * Percent-encoding that matches Python's `urlencode`, which is what the API
+   * signs with. It differs from `encodeURIComponent` in two ways: a space becomes
+   * `+` rather than `%20`, and `!'()*` are escaped instead of passed through.
+   * Signing a space as `%20` is what made any query with a multi-word `search`
+   * fail with `authentication_failed`.
+   */
+  private static quotePlus(value: string): string {
+    return encodeURIComponent(value)
+      .replace(
+        /[!'()*]/g,
+        (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`,
+      )
+      .replace(/%20/g, "+");
   }
 
   /** Normalize a request body into the flat map of parameters that gets signed. */
@@ -125,16 +152,10 @@ export class Futuur {
     return data as Record<string, unknown>;
   }
 
-  private buildSignature(params: Record<string, unknown>): string {
-    const flat: Record<string, string> = {};
-    for (const [k, v] of Object.entries(params)) {
-      if (v === undefined || v === null) continue;
-      flat[k] = this.signatureValue(v);
-    }
-
-    const paramString = Object.keys(flat)
+  private buildSignature(params: Record<string, string>): string {
+    const paramString = Object.keys(params)
       .sort()
-      .map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(flat[k])}`)
+      .map((k) => `${Futuur.quotePlus(k)}=${Futuur.quotePlus(params[k])}`)
       .join("&");
 
     return CryptoJS.HmacSHA512(paramString, this.privateKey).toString(

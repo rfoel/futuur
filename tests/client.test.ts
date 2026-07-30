@@ -19,15 +19,30 @@ function signatureValue(value: unknown): string {
   return String(value);
 }
 
+/** Mirrors Python's `urlencode`, which is how the API builds its own signature. */
+function quotePlus(value: string): string {
+  return encodeURIComponent(value)
+    .replace(
+      /[!'()*]/g,
+      (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`,
+    )
+    .replace(/%20/g, "+");
+}
+
+/**
+ * Every key given is signed. Omit a key to model a null query param, which never
+ * reaches the wire; pass the string `"None"` to model a null body param, which
+ * does.
+ */
 function expectedHmac(params: Record<string, unknown>): string {
   const flat: Record<string, string> = {};
   for (const [k, v] of Object.entries(params)) {
-    if (v === undefined || v === null) continue;
+    if (v === undefined) continue;
     flat[k] = signatureValue(v);
   }
   const paramString = Object.keys(flat)
     .sort()
-    .map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(flat[k])}`)
+    .map((k) => `${quotePlus(k)}=${quotePlus(flat[k])}`)
     .join("&");
   return CryptoJS.HmacSHA512(paramString, PRIVATE_KEY).toString(
     CryptoJS.enc.Hex,
@@ -140,6 +155,81 @@ describe("Futuur auth headers", () => {
     const ts = capturedHeaders.timestamp;
     expect(capturedHeaders.hmac).toBe(
       expectedHmac({ Key: PUBLIC_KEY, Timestamp: ts, ...body }),
+    );
+  });
+
+  it("signs a space as + rather than %20", async () => {
+    const sdk = makeSdk();
+    let capturedHeaders: Record<string, string> = {};
+
+    api()
+      .get(`${PREFIX}/events/`)
+      .query({ search: "bitcoin hourly", limit: "5" })
+      .reply(function () {
+        capturedHeaders = this.req.headers as Record<string, string>;
+        return [200, { pagination: PAGINATION, results: [] }];
+      });
+
+    await sdk.listEvents({ search: "bitcoin hourly", limit: 5 });
+
+    const ts = capturedHeaders.timestamp;
+    expect(capturedHeaders.hmac).toBe(
+      expectedHmac({
+        Key: PUBLIC_KEY,
+        Timestamp: ts,
+        search: "bitcoin hourly",
+        limit: 5,
+      }),
+    );
+  });
+
+  it("signs a null body param as None", async () => {
+    const sdk = makeSdk();
+    let capturedHeaders: Record<string, string> = {};
+
+    const body = {
+      market: 4567,
+      side: "bid" as const,
+      currency: "USDC",
+      price: null,
+      shares: 100,
+    };
+
+    api()
+      .post(`${PREFIX}/orders/`, body)
+      .reply(function () {
+        capturedHeaders = this.req.headers as Record<string, string>;
+        return [201, { id: 1, ...body, position: "long", status: "open" }];
+      });
+
+    await sdk.createOrder(body);
+
+    const ts = capturedHeaders.timestamp;
+    expect(capturedHeaders.hmac).toBe(
+      expectedHmac({ ...body, Key: PUBLIC_KEY, Timestamp: ts, price: "None" }),
+    );
+  });
+
+  it("leaves a null query param out of the signature", async () => {
+    const sdk = makeSdk();
+    let capturedHeaders: Record<string, string> = {};
+
+    api()
+      .get(`${PREFIX}/events/`)
+      .query({ limit: "5" })
+      .reply(function () {
+        capturedHeaders = this.req.headers as Record<string, string>;
+        return [200, { pagination: PAGINATION, results: [] }];
+      });
+
+    await sdk.listEvents({
+      limit: 5,
+      search: null as unknown as string,
+    });
+
+    const ts = capturedHeaders.timestamp;
+    expect(capturedHeaders.hmac).toBe(
+      expectedHmac({ Key: PUBLIC_KEY, Timestamp: ts, limit: 5 }),
     );
   });
 
