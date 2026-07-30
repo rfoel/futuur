@@ -1,6 +1,6 @@
 {
   "name": "futuur",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "A TypeScript SDK for interacting with the Futuur API. This SDK provides a simple and type-safe way to interact with all Futuur API endpoints.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
