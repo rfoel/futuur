@@ -1,6 +1,6 @@
 export type CurrencyMode = "play_money" | "real_money";
 export type Currency = "USDC" | "USDT" | "USD" | "OOM" | string;
-export type Position = "l" | "s";
+export type Position = "long" | "short";
 export type OrderSide = "bid" | "ask";
 
 export interface PaginationParams {
@@ -10,33 +10,86 @@ export interface PaginationParams {
   offset?: number;
 }
 
-export interface PaginatedResponse<T> {
-  count: number;
+export interface Pagination {
+  /** Total number of records matching the query. */
+  total: number;
+  /** URL for the next page, or null on the last page. */
   next: string | null;
+  /** URL for the previous page, or null on the first page. */
   previous: string | null;
+  page_size: number;
+  offset: number;
+}
+
+export interface PaginatedResponse<T> {
+  pagination: Pagination;
   results: T[];
+}
+
+/** Extra per-request options accepted by mutating endpoints. */
+export interface RequestOptions {
+  /**
+   * Value for the `Idempotency-Key` header. Replaying the same request with the
+   * same key and body returns the stored response instead of duplicating work.
+   */
+  idempotencyKey?: string;
 }
 
 /* ── Me ─────────────────────────────────────────────────────────────── */
 
+export type KycStatus =
+  | "no_need"
+  | "requested"
+  | "initialized"
+  | "refused"
+  | "approved"
+  | "by_passed";
+
+/** Balances keyed by currency code, as decimal strings. */
+export type Wallet = Record<string, string>;
+
 export interface MeResponse {
   id: number;
-  username: string;
+  username?: string;
   email: string;
-  oom_balance: string;
-  usdc_balance: string;
-  usdt_balance: string;
-  usd_balance: string;
-  is_email_confirmed: boolean;
+  wallet: Wallet;
+  email_confirmed: boolean;
+  real_currency_enabled: boolean;
+  kyc_status: KycStatus;
+  date_joined?: string;
+  /** `"true"` when the account was created through a wallet (Privy) signup. */
+  is_wallet_user?: string;
+}
+
+export interface BalancesParams {
+  /** Currency code to filter by. Matching is case-insensitive. */
+  currency?: Currency;
+}
+
+export interface Balance {
+  currency: Currency;
+  /** Balance as a decimal string. */
+  amount: string;
+}
+
+export type BalancesResponse = Balance[];
+
+export interface RegisterSafeBody {
+  /** Safe smart account address. */
+  safe_address: string;
+  /** Chain ID where the Safe is deployed (1 = Ethereum, 137 = Polygon). */
+  chain_id: number;
 }
 
 export interface RankingResponse {
-  rank: number;
-  score: number;
-  total_users: number;
+  /** Current leaderboard position, returned as a string. */
+  ranking: string;
 }
 
 /* ── Events ─────────────────────────────────────────────────────────── */
+
+export type EventStatus =
+  "open" | "stopped" | "resolved" | "cancelled" | "paused" | "reversed";
 
 export type EventOrdering =
   | "relevance"
@@ -67,82 +120,179 @@ export interface EventListParams extends PaginationParams {
   tag?: string;
 }
 
-export interface Outcome {
-  id: number;
+export interface Tag {
   name: string;
-  price: number;
+  slug: string;
+}
+
+export interface Category {
+  id: number;
+  title: string;
+  slug: string;
+  parent: number | null;
+  in_leaderboard: boolean;
+  icon: string | null;
 }
 
 export interface Market {
   id: number;
-  title?: string;
-  outcomes: Outcome[];
+  title: string;
+  title_verbose?: string;
+  /** Current probability per currency code, e.g. `{ OOM: 0.52, USDC: 0.5 }`. */
+  price: Record<string, number>;
+  long_label?: string;
+  short_label?: string;
+  status?: string;
+  resolution?: string | null;
+  resolution_display?: string | null;
+  position_labels?: string;
+  volume_play_money?: number;
+  volume_real_money?: number;
+  liquidity_play_money?: number;
+  liquidity_real_money?: number;
+  depth_play_money?: number;
+  depth_real_money?: number;
+  thumbnail?: string | null;
+  order?: number;
 }
 
 export interface FuturEvent {
   id: number;
   title: string;
+  slug: string;
+  status: EventStatus;
+  tags: Tag[];
+  category: Category[];
+  markets: Market[];
   description?: string;
-  category: number;
-  currency_mode: CurrencyMode;
-  resolved: boolean;
+  bet_end_date: string | null;
+  event_start_date: string | null;
+  event_end_date?: string | null;
+  is_wagerable?: boolean;
+  available_currencies?: Currency[];
   resolution?: string | null;
-  pending_resolution: boolean;
-  live: boolean;
-  tags: string[];
-  created_at: string;
-  closes_at: string;
-  resolved_at?: string | null;
-  markets?: Market[];
+  resolve_date?: string | null;
+  real_currency_available?: boolean;
+  markets_correlation?: string;
+  canonical_currency?: Currency;
+  order_book_enabled?: boolean;
+  thumbnail?: string | null;
+  tax_play_money?: number | null;
+  tax_real_money?: number | null;
+  resolution_mode?: string;
+  event_type?: string | null;
+  is_live?: boolean;
+  wagers_count_play_money?: number;
+  wagers_count_real_money?: number;
+  comment_count?: number;
+  volume_play_money?: number;
+  volume_real_money?: number;
+  liquidity_play_money?: number;
+  liquidity_real_money?: number;
+  is_following?: boolean;
 }
 
 export type EventListResponse = PaginatedResponse<FuturEvent>;
-export type EventDetailResponse = FuturEvent & { markets: Market[] };
+export type EventDetailResponse = FuturEvent;
 
-export interface EventActionsParams {
+export interface EventTaxResponse {
+  /** Fee applied to play money trades, or null when untaxed. */
+  tax_play_money: number | null;
+  /** Fee applied to real money trades, or null when untaxed. */
+  tax_real_money: number | null;
+}
+
+export interface RelatedEventMarket {
+  id: number;
+  title: string;
+  probability: number;
+  image?: string | null;
+}
+
+export interface RelatedEvent {
+  id: number;
+  title: string;
+  wagers_count: number;
+  wagers_count_canonical: number;
+  volume_play_money: number | string;
+  volume_real_money: number | string;
+  liquidity_play_money?: number | string;
+  liquidity_real_money?: number | string;
+  bet_end_date: string | null;
+  event_start_date: string | null;
+  highest_market: RelatedEventMarket | string | null;
+  highest_market_real_money: RelatedEventMarket | string | null;
+}
+
+export type RelatedEventsResponse = RelatedEvent[];
+
+export interface EventActionsParams extends PaginationParams {
+  /** @default true */
+  aggregate_by_orders?: boolean;
   currency_mode?: CurrencyMode;
-  my_bets?: boolean;
+  /** @default false */
   following?: boolean;
+  /** @default false */
+  my_bets?: boolean;
   /** @maxLength 100 */
   search?: string;
 }
 
-export interface EventAction {
-  id: number;
-  type: string;
-  timestamp: string;
-  market: number;
-  outcome: number;
-  shares: number;
-  amount: number;
-  price: number;
-  user?: { id: number; username: string } | null;
+export interface EventActionUser {
+  id: number | null;
+  username: string | null;
+  picture: string | null;
 }
 
-export interface EventActionsResponse {
-  results: EventAction[];
+export interface EventAction {
+  id: number;
+  event: Pick<FuturEvent, "id" | "title" | "slug" | "status"> &
+    Record<string, unknown>;
+  market: Market;
+  user: EventActionUser;
+  action: string;
+  action_display: string;
+  wager: number;
+  price: number;
+  shares: number;
+  amount: number;
+  profit: number | null;
+  currency: Currency;
+  position: Position;
+  maker_rebate?: number;
+  created: string;
 }
+
+export type EventActionsResponse = PaginatedResponse<EventAction>;
+
+/* ── Markets ────────────────────────────────────────────────────────── */
 
 export interface OrderBookParams {
   currency_mode: CurrencyMode;
-  market: number;
-  /** @default "l" */
+  /** @default "long" */
   position?: Position;
 }
 
 export interface OrderBookLevel {
+  /** Price per share at this level (0–1). */
   price: number;
-  shares: number;
-  amount: number;
+  total_shares: number;
+  total_amount: number;
+  total_fees: number;
   cumulative_shares: number;
   cumulative_amount: number;
-  user_shares?: number;
-  user_pending_shares?: number;
+  cumulative_fees: number;
+  /** Shares at this level belonging to you. Present when authenticated. */
+  total_user_shares?: number;
+  /** Requested but unfilled shares of yours. Present when authenticated. */
+  total_user_shares_requested?: number;
 }
 
 export interface OrderBookResponse {
-  bids: OrderBookLevel[];
-  asks: OrderBookLevel[];
+  /** Bid levels, highest price first. */
+  bid: OrderBookLevel[];
+  /** Ask levels, lowest price first. */
+  ask: OrderBookLevel[];
 }
 
 export type TimeInterval = "day" | "week" | "month" | "year" | "all_time";
@@ -153,14 +303,55 @@ export interface PriceHistoryParams {
 }
 
 export interface PriceHistoryPoint {
-  timestamp: string;
-  outcomes: { outcome_id: number; name: string; price: number }[];
+  /** ISO 8601 timestamp. */
+  x: string;
+  /** Probability at that timestamp, expressed as a percentage. */
+  y: number;
 }
 
-export interface PriceHistoryResponse {
-  currency_mode: CurrencyMode;
-  time_interval: TimeInterval;
-  history: PriceHistoryPoint[];
+export interface PriceHistorySeries {
+  /** Market (outcome) title. */
+  name: string;
+  data: PriceHistoryPoint[];
+}
+
+/** One series per market in the event. */
+export type PriceHistoryResponse = PriceHistorySeries[];
+
+/* ── Wagers ─────────────────────────────────────────────────────────── */
+
+export type WagerStatus =
+  "purchased" | "sold" | "won" | "lost" | "cancelled" | "disabled";
+
+export interface Wager {
+  id: number;
+  status: WagerStatus;
+  status_display: string;
+  /** User resource URL. */
+  user: string;
+  /** Event resource URL. */
+  event: string;
+  /** Market resource URL. */
+  market: string;
+  position: Position;
+  position_display: string;
+  currency?: Currency;
+  shares: number;
+  shares_in_canonical: number;
+  total_amount: string;
+  purchases_amount?: number;
+  active_purchases_amount: string;
+  active_purchases?: unknown;
+  roi: string;
+  earnings: string;
+  amount_on_win: string;
+  amount_on_sell: string;
+  last_profit: number | null;
+  last_sell_amount?: number | null;
+  last_purchase: string;
+  last_update: string;
+  last_action?: unknown;
+  actions_count?: number;
 }
 
 export interface EventWagersParams {
@@ -170,35 +361,8 @@ export interface EventWagersParams {
   past_bets?: boolean;
 }
 
-export interface Wager {
-  id: number;
-  user?: number;
-  market: number;
-  event: number;
-  outcome?: number;
-  outcome_name?: string;
-  currency: Currency;
-  currency_mode: CurrencyMode;
-  shares: number;
-  amount: number;
-  amount_spent?: number;
-  avg_price?: number;
-  average_price?: number;
-  current_value?: number;
-  payout?: number;
-  status: string;
-  position: Position;
-  active?: boolean;
-  settled?: boolean;
-  created_at: string;
-  updated_at?: string;
-}
-
-export interface EventWagersResponse {
-  results: Wager[];
-}
-
-/* ── Wagers ─────────────────────────────────────────────────────────── */
+/** Event wagers are returned unpaginated. */
+export type EventWagersResponse = Wager[];
 
 export interface WagerListParams extends PaginationParams {
   active?: boolean;
@@ -206,25 +370,32 @@ export interface WagerListParams extends PaginationParams {
   event?: number;
   user?: number;
   following?: boolean;
-  currency_mode?: CurrencyMode | "all";
+  /** Empty string returns every currency mode. */
+  currency_mode?: CurrencyMode | "";
 }
 
 export type WagerListResponse = PaginatedResponse<Wager>;
 
 export type WagerDetailResponse = Wager & {
-  market_detail?: { id: number; title: string; probability: number };
-  event_detail?: { id: number; title: string; closes_at: string };
+  /** Wager action history resource URL. */
+  actions: string;
 };
+
+export interface RebatesParams {
+  /** Calendar date in `YYYY-MM-DD` format. */
+  date?: string;
+  event?: number;
+}
+
+export interface RebatesResponse {
+  /** Total rebated maker fees in USD for the selected scope. */
+  rebated_fee_usd: number;
+}
 
 /* ── Orders ─────────────────────────────────────────────────────────── */
 
 export type OrderStatus =
-  | "open"
-  | "partial_filled"
-  | "filled"
-  | "canceled"
-  | "processing"
-  | string;
+  "open" | "partial_filled" | "filled" | "canceled" | "processing";
 
 export interface OrderListParams extends PaginationParams {
   /** @default "open" */
@@ -245,31 +416,35 @@ export interface OrderListParams extends PaginationParams {
 
 export interface Order {
   id: number;
-  market: number;
+  market: number | string;
+  event?: number | string;
   side: OrderSide;
   currency: Currency;
   /** Probability 0–1 for limit orders; null for market orders. */
   price: number | null;
   shares: number;
-  amount: number;
+  shares_requested?: number;
+  shares_filled?: string | number;
+  amount?: number;
   position: Position;
   status: OrderStatus;
   expired_at: string | null;
-  created_at: string;
+  created_at?: string;
+  /** Batch endpoints return the creation timestamp as `created`. */
+  created?: string;
 }
 
 export type OrderListResponse = PaginatedResponse<Order>;
 
 export interface CreateOrderBody {
-  /** Market outcome ID */
+  /** Market (outcome) ID */
   market: number;
   side: OrderSide;
   currency: Currency;
-  /** Probability 0–1 for limit order; null for market order. */
-  price?: number | null;
-  shares?: number;
-  amount?: number;
-  /** @default "l" */
+  /** Probability 0–1 for a limit order; null for a market order. */
+  price?: number | string | null;
+  shares?: number | string;
+  amount?: number | string;
   position?: Position;
   /** ISO 8601 expiration; null for no expiry. */
   expired_at?: string | null;
@@ -278,3 +453,94 @@ export interface CreateOrderBody {
 }
 
 export type CreateOrderResponse = Order;
+
+export interface BatchCreateOrderItem extends CreateOrderBody {
+  /** When set, the API verifies the market belongs to this event. */
+  event?: number;
+  position: Position;
+  shares: number | string;
+}
+
+export interface BatchCreateOrdersBody {
+  /** Between 1 and 20 orders. */
+  orders: BatchCreateOrderItem[];
+}
+
+export interface BatchCreateOrderResult {
+  /** Zero-based position of this order in the request payload. */
+  index: number;
+  success: boolean;
+  /** Present when `success` is true. */
+  order?: Order;
+  /** Present when `success` is false. */
+  errors?: unknown;
+}
+
+export interface BatchCreateOrdersResponse {
+  results: BatchCreateOrderResult[];
+  /** Orders canceled because `cancel_conflicting_orders` was set. */
+  cancelled_existing_order_ids: number[];
+}
+
+export interface BatchCancelOrdersBody {
+  /** Order IDs to cancel. Must contain at least one ID. */
+  order_ids: number[];
+}
+
+export interface BatchCancelOrderResult {
+  index: number;
+  order_id: number;
+  success: boolean;
+  /** Present when `success` is false. */
+  error?: string;
+}
+
+export type BatchCancelOrdersResponse = BatchCancelOrderResult[];
+
+export interface BatchUpdateOrderItem {
+  /** ID of the open order to update. */
+  id: number;
+  shares?: number | string;
+  /** Updated limit price between 0 and 1. */
+  price?: number | string;
+  /** Updated ISO 8601 expiration; null removes it. */
+  expired_at?: string | null;
+}
+
+export interface BatchUpdateOrdersBody {
+  /** Between 1 and 20 updates. */
+  orders: BatchUpdateOrderItem[];
+}
+
+export interface BatchUpdateOrderResult {
+  index: number;
+  order_id?: number;
+  success: boolean;
+  /** Replacement order. Present when `success` is true. */
+  order?: Order;
+  /** Present when `success` is false. */
+  errors?: unknown;
+}
+
+export type BatchUpdateOrdersResponse = BatchUpdateOrderResult[];
+
+export interface CancelAllOrdersBody {
+  /** Restrict cancellation to one event (question) ID. */
+  event?: number;
+  /** Restrict cancellation to one market (outcome) ID. */
+  market?: number;
+}
+
+export interface CancelAllOrdersResponse {
+  canceled_order_ids: number[];
+  /** Orders mid-fill that must be retried through batch cancel. */
+  processing_order_ids: number[];
+}
+
+/* ── WebSocket ──────────────────────────────────────────────────────── */
+
+export interface PusherAuthResponse {
+  auth: string;
+  channel_data?: string;
+  shared_secret?: string;
+}
