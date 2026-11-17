@@ -2,6 +2,10 @@ export type CurrencyMode = "play_money" | "real_money";
 export type Currency = "USDC" | "USDT" | "USD" | "OOM" | string;
 export type Position = "long" | "short";
 export type OrderSide = "bid" | "ask";
+/** `gtc` rests on the book; `ioc` fills what it can now and cancels the rest. */
+export type TimeInForce = "gtc" | "ioc";
+/** Decimal values can be sent as strings, which keeps the signed text exact. */
+export type Decimal = number | string;
 
 export interface PaginationParams {
   /** Number of results to return per page. */
@@ -77,8 +81,8 @@ export type BalancesResponse = Balance[];
 export interface RegisterSafeBody {
   /** Safe smart account address. */
   safe_address: string;
-  /** Chain ID where the Safe is deployed (1 = Ethereum, 137 = Polygon). */
-  chain_id: number;
+  /** Defaults to the active chain. Any other value is rejected. */
+  chain_id?: number;
 }
 
 export interface RankingResponse {
@@ -91,16 +95,25 @@ export interface RankingResponse {
 export type EventStatus =
   "open" | "stopped" | "resolved" | "cancelled" | "paused" | "reversed";
 
-export type EventOrdering =
+type EventOrderingField =
   | "relevance"
-  | "-created_on"
+  | "created_on"
   | "bet_end_date"
-  | "-wagers_count"
-  | "-volume"
-  | string;
+  | "wagers_count"
+  | "volume"
+  | "open_date"
+  | "resolve_date";
+
+export type EventOrdering = EventOrderingField | `-${EventOrderingField}`;
 
 export interface EventListParams extends PaginationParams {
+  /** Category IDs. A root category includes its descendants. */
   categories?: number[];
+  /**
+   * Category slugs, as an alternative to `categories`. When both are set, an
+   * event must match both.
+   */
+  category_slug?: string[];
   /** @default "play_money" */
   currency_mode?: CurrencyMode;
   /** @default false */
@@ -116,8 +129,12 @@ export interface EventListParams extends PaginationParams {
   resolved_only?: boolean;
   /** @maxLength 100 */
   search?: string;
-  /** @maxLength 100 */
-  tag?: string;
+  /** Tag slugs or names, up to 10. An event matches any of them. */
+  tag?: string | string[];
+  /** Inclusive lower bound for `bet_end_date`, ISO 8601 with a timezone. */
+  bet_end_date_after?: string;
+  /** Inclusive upper bound for `bet_end_date`, ISO 8601 with a timezone. */
+  bet_end_date_before?: string;
 }
 
 export interface Tag {
@@ -153,7 +170,13 @@ export interface Market {
   depth_play_money?: number;
   depth_real_money?: number;
   thumbnail?: string | null;
+  long_thumbnail?: string | null;
+  short_thumbnail?: string | null;
   order?: number;
+  volume_24h_play_money?: number;
+  volume_24h_real_money?: number;
+  last_trade_at_play_money?: string | null;
+  last_trade_at_real_money?: string | null;
 }
 
 export interface FuturEvent {
@@ -190,6 +213,10 @@ export interface FuturEvent {
   liquidity_play_money?: number;
   liquidity_real_money?: number;
   is_following?: boolean;
+  is_new?: boolean;
+  is_pinned?: boolean;
+  hot?: boolean;
+  relevance?: number;
 }
 
 export type EventListResponse = PaginatedResponse<FuturEvent>;
@@ -298,7 +325,8 @@ export interface OrderBookResponse {
 export type TimeInterval = "day" | "week" | "month" | "year" | "all_time";
 
 export interface PriceHistoryParams {
-  currency_mode: CurrencyMode;
+  /** @default "play_money" */
+  currency_mode?: CurrencyMode;
   time_interval?: TimeInterval;
 }
 
@@ -395,14 +423,23 @@ export interface RebatesResponse {
 /* ── Orders ─────────────────────────────────────────────────────────── */
 
 export type OrderStatus =
-  "open" | "partial_filled" | "filled" | "canceled" | "processing";
+  | "processing"
+  | "open"
+  | "filled"
+  | "partial_filled"
+  | "partial_filled_cancelled"
+  | "canceled";
 
 export interface OrderListParams extends PaginationParams {
-  /** @default "open" */
+  /**
+   * `open` (the default) also returns `processing` orders on open events.
+   * @default "open"
+   */
   status?: OrderStatus;
   side?: OrderSide;
   /** Outcome ID */
   market?: number;
+  /** When set, `event` and `market` in each result are plain IDs. */
   event?: number;
   /** @maxLength 4 */
   currency?: Currency;
@@ -411,45 +448,117 @@ export interface OrderListParams extends PaginationParams {
   categories?: number[];
   /** @maxLength 255 */
   search?: string;
+  /** `created`, `price`, `market_title`, `expiration_date` or `total`; prefix `-` to descend. */
   ordering?: string;
 }
 
+/** On-chain settlement state of an order. Empty or `none` for ledger orders. */
+export type SettlementStatus =
+  | "ready"
+  | "approval_pending"
+  | "settling"
+  | "settled"
+  | "failed"
+  | "none"
+  | "";
+
+export type OrderEvent = Pick<
+  FuturEvent,
+  | "id"
+  | "title"
+  | "slug"
+  | "status"
+  | "is_wagerable"
+  | "resolve_date"
+  | "bet_end_date"
+  | "order_book_enabled"
+  | "resolution_mode"
+> & { markets_count?: number };
+
 export interface Order {
   id: number;
-  market: number | string;
-  event?: number | string;
+  /** Nested event, or a plain event ID when the list was filtered by `event`. */
+  event: OrderEvent | number;
+  /** Nested market, or a plain market ID when the list was filtered by `event`. */
+  market: Market | number;
   side: OrderSide;
-  currency: Currency;
-  /** Probability 0–1 for limit orders; null for market orders. */
-  price: number | null;
-  shares: number;
-  shares_requested?: number;
-  shares_filled?: string | number;
-  amount?: number;
   position: Position;
+  currency: Currency;
+  /** Limit price (0.01–0.99); null for market orders. */
+  price: number | null;
+  /** Shares still unfilled. */
+  shares: number;
+  /** Shares the order was created with. */
+  shares_requested: number;
+  /** Shares filled so far. */
+  shares_filled: number;
+  /** For a finished `ioc` order, the shares that were canceled; 0 otherwise. */
+  shares_cancelled: number;
+  /** Average fill price, or null before any fill. */
+  average_price: number | null;
+  /**
+   * Net cash of the fills where this order was the taker, after the fee: what a
+   * bid paid or an ask received. Null without a taker fill.
+   */
+  proceeds: number | null;
+  time_in_force: TimeInForce;
   status: OrderStatus;
   expired_at: string | null;
-  created_at?: string;
-  /** Batch endpoints return the creation timestamp as `created`. */
-  created?: string;
+  created: string;
+  /** `onchain` for signed orders, otherwise `ledger` or empty. */
+  settlement_mode: "onchain" | "ledger" | "";
+  settlement_status: SettlementStatus;
+  /** Chain of an on-chain order, or null. */
+  chain_id: number | null;
 }
 
 export type OrderListResponse = PaginatedResponse<Order>;
 
-export interface CreateOrderBody {
+/**
+ * Fields of a signed `LimitOrderIntent`, required for `OOM` and `USDC` orders on
+ * the on-chain preview host. Take them from {@link SigningContextResponse} and
+ * the owner's signature over its `eip712` payload.
+ */
+export interface OrderIntentFields {
+  /** Hex EIP-712 signature of the `LimitOrderIntent`, by the Safe owner EOA. */
+  order_intent_signature?: string;
+  /** The `expiry` you signed (Unix seconds). */
+  order_intent_expiry?: number | string;
+  /** The `nonce` you signed. */
+  order_intent_nonce?: number | string;
+  /** The `maxUsdcRaw` you signed, in raw token units. `0` for asks. */
+  max_usdc_raw?: number | string;
+  /** Defaults to the active chain. */
+  chain_id?: number | string;
+}
+
+export interface CreateOrderBody extends OrderIntentFields {
   /** Market (outcome) ID */
-  market: number;
+  market: number | string;
   side: OrderSide;
   currency: Currency;
-  /** Probability 0–1 for a limit order; null for a market order. */
-  price?: number | string | null;
-  shares?: number | string;
-  amount?: number | string;
+  /**
+   * Shares to buy or sell; must be greater than 0.02. On an ask, `"max"` sells
+   * every share not reserved by your open asks.
+   */
+  shares: Decimal | "max";
+  /** Only valid with `shares: "max"`: caps how many shares are sold. */
+  max_shares?: Decimal;
+  /** Limit price 0.01–0.99 in steps of 0.01; null for a market order. */
+  price?: Decimal | null;
+  /** @default "long" */
   position?: Position;
+  /** @default "gtc" */
+  time_in_force?: TimeInForce;
   /** ISO 8601 expiration; null for no expiry. */
   expired_at?: string | null;
   /** @default false */
   cancel_conflicting_orders?: boolean;
+  /**
+   * Optional cross-check of the total. It does not size the order; the create
+   * fails if it no longer matches the book.
+   */
+  amount?: Decimal;
 }
 
 export type CreateOrderResponse = Order;
@@ -458,7 +567,6 @@ export interface BatchCreateOrderItem extends CreateOrderBody {
   /** When set, the API verifies the market belongs to this event. */
   event?: number;
   position: Position;
-  shares: number | string;
 }
 
 export interface BatchCreateOrdersBody {
@@ -498,13 +606,19 @@ export interface BatchCancelOrderResult {
 export type BatchCancelOrdersResponse = BatchCancelOrderResult[];
 
 export interface BatchUpdateOrderItem {
-  /** ID of the open order to update. */
+  /** ID of the open order to update. At least one other field is required. */
   id: number;
-  shares?: number | string;
+  shares?: Decimal;
   /** Updated limit price between 0 and 1. */
-  price?: number | string;
+  price?: Decimal;
   /** Updated ISO 8601 expiration; null removes it. */
   expired_at?: string | null;
+  /** Keeps the existing value when omitted. */
+  time_in_force?: TimeInForce;
+  market?: number;
+  side?: OrderSide;
+  position?: Position;
+  currency?: Currency;
 }
 
 export interface BatchUpdateOrdersBody {
@@ -516,7 +630,7 @@ export interface BatchUpdateOrderResult {
   index: number;
   order_id?: number;
   success: boolean;
-  /** Replacement order. Present when `success` is true. */
+  /** Replacement order, with a new `id`. Present when `success` is true. */
   order?: Order;
   /** Present when `success` is false. */
   errors?: unknown;
@@ -543,4 +657,197 @@ export interface PusherAuthResponse {
   auth: string;
   channel_data?: string;
   shared_secret?: string;
+}
+
+/* ── Trading status ─────────────────────────────────────────────────── */
+
+export interface TradingStatusResponse {
+  /** When true, order creation is paused for everyone. */
+  trading_halted: boolean;
+  [key: string]: unknown;
+}
+
+/* ── On-chain trading (phase-one preview host) ──────────────────────── */
+
+export interface SigningContextBody {
+  /** Market (outcome) ID */
+  market: number | string;
+  /** 0.01–0.99, at most two decimals. */
+  price: Decimal;
+  /** Greater than 0.02, at most two decimals. */
+  shares: Decimal;
+  currency: "OOM" | "USDC";
+  position: Position;
+  side: OrderSide;
+  /** Defaults to your Safe's chain. */
+  chain_id?: number | string;
+}
+
+export interface Eip712TypedData {
+  domain: {
+    name: string;
+    version: string;
+    chainId: number;
+    verifyingContract: string;
+  };
+  types: Record<string, { name: string; type: string }[]>;
+  primaryType: string;
+  message: Record<string, unknown>;
+}
+
+export interface SigningContextResponse {
+  /**
+   * Typed data to sign with the Safe owner EOA. `types` holds only
+   * `LimitOrderIntent`; add `EIP712Domain` if your library needs it.
+   */
+  eip712: Eip712TypedData;
+  chainId: number;
+  safeAddress: string;
+  /** EOA that must sign. */
+  ownerAddress: string;
+  poolAddress: string;
+  currency: string;
+  collateralToken: string;
+  usdcToken?: string;
+  /** The Safe's next order nonce. Send back as `order_intent_nonce`. */
+  nonce: number;
+  /** Unix seconds, 30 days ahead. Send back as `order_intent_expiry`. */
+  expiry: number;
+  /** Bid cap in raw token units (6 decimals); `"0"` for an ask. Send back as `max_usdc_raw`. */
+  maxUsdcRaw: string;
+  allowanceRaw: string;
+  /** True when this is a bid and the pool allowance is too low: enable trading first. */
+  needsApproval: boolean;
+}
+
+export interface DeriveApiKeyBody {
+  /** Owner EOA (checksum or lowercase). */
+  address: string;
+  /** Unix seconds, within ±120 s of the server clock. */
+  timestamp: number;
+  /** Change it when retrying within the same second. */
+  nonce: number;
+  /** Hex EIP-712 `DeriveApiKey` signature. */
+  signature: string;
+  /** Must be the chain ID you signed. Defaults to the active chain. */
+  chain_id?: number;
+}
+
+export interface DeriveApiKeyResponse {
+  id: number;
+  public_key: string;
+  private_key: string;
+  user_id: number;
+}
+
+export type SafeDeployStatus =
+  "not_deployed" | "not_required" | "deploying" | "deployed" | "failed";
+
+export interface SafeWallet {
+  address: string;
+  chain_id: number;
+  /** Orders need `deployed`. */
+  deploy_status: SafeDeployStatus;
+  deployed_at: string | null;
+  deploy_tx: string | null;
+  deploy_error: string | null;
+  last_balance: number | null;
+  last_balance_check_at: string | null;
+  migration_status: "none" | "pending" | "done" | "failed";
+  migration_tx: string | null;
+  migrated_at: string | null;
+  migration_error: string | null;
+  onchain_settlement_enabled: boolean;
+  play_money_onchain_settlement_enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SafeWalletParams {
+  chain_id?: number;
+  /** Re-read the balance from the chain instead of the cached value. */
+  refresh?: boolean;
+}
+
+export interface ConfirmSafeDeployedBody {
+  chain_id?: number;
+  transaction_hash?: string;
+  user_operation_hash?: string;
+}
+
+export interface RegisterSafeResponse extends SafeWallet {
+  /** Result of the legacy-balance migration check, including a `reason`. */
+  migration: Record<string, unknown>;
+}
+
+export interface SafeTradingStatusParams {
+  /** @default "USDC" */
+  currency?: "USDC" | "OOM";
+  chain_id?: number;
+}
+
+export interface SafeTradingStatusResponse {
+  /** True when the Safe is deployed and the pool allowance is in place. */
+  enabled: boolean;
+  chainId: number;
+  currency: string;
+  safeAddress: string | null;
+  ownerAddress: string | null;
+  /** The `approve` spender. */
+  poolAddress: string | null;
+  collateralToken: string | null;
+  usdcToken?: string | null;
+  allowanceRaw: string;
+  /** Amount to approve: the maximum uint256. */
+  approveAmountRaw: string;
+  deployed: boolean;
+  /** Why trading is not enabled, when it is not. */
+  detail: string | null;
+}
+
+/** An ERC-4337 EntryPoint v0.7 UserOperation. */
+export type UserOperation = Record<string, unknown> & { sender: string };
+
+export interface EnableTradingBody {
+  /** Signed UserOperation calling `approve(pool, amount)` on the collateral token. */
+  user_operation: UserOperation;
+  /** @default "USDC" */
+  currency?: "USDC" | "OOM";
+  chain_id?: number;
+}
+
+export interface EnableTradingResponse extends SafeTradingStatusResponse {
+  alreadyEnabled: boolean;
+  userOperationHash: string | null;
+  confirmedAt?: string;
+}
+
+export interface UserOperationBody {
+  user_operation: UserOperation;
+  chain_id?: number;
+  /** Must be the supported EntryPoint when set. */
+  entry_point?: string;
+}
+
+export interface SubmitUserOperationResponse {
+  userOperationHash: string;
+}
+
+export type BundlerRpcMethod =
+  | "pm_sponsorUserOperation"
+  | "eth_sendUserOperation"
+  | "eth_estimateUserOperationGas"
+  | "eth_getUserOperationReceipt"
+  | "pimlico_getUserOperationGasPrice";
+
+export interface BundlerRpcBody {
+  method: BundlerRpcMethod;
+  params: unknown[];
+  chain_id?: number;
+}
+
+/** A bundler error is also returned with status 200, as `error`. */
+export interface BundlerRpcResponse {
+  result?: unknown;
+  error?: { message: string; code: number; data?: unknown };
 }

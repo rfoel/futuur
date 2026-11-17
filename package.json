@@ -10,7 +10,8 @@
   },
   "scripts": {
     "build": "tsc",
-    "format": "prettier --write \"src/**/*.ts\"",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "format": "prettier --write \"{src,tests}/**/*.ts\"",
     "test": "vitest run",
     "test:watch": "vitest"
   },
@@ -25,23 +26,18 @@
   ],
   "author": "Rafael Franco",
   "license": "MIT",
-  "dependencies": {
-    "axios": "^1.19.0",
-    "crypto-js": "^4.2.0"
-  },
-  "overrides": {
-    "ip-address": "^10.1.1"
+  "engines": {
+    "node": ">=22"
   },
   "devDependencies": {
     "@semantic-release/git": "^11.0.1",
-    "@semantic-release/npm": "^13.1.5",
-    "@types/crypto-js": "^4.2.2",
-    "@types/node": "^26.1.2",
-    "nock": "^14.0.16",
-    "prettier": "^3.9.6",
-    "semantic-release": "^25.0.8",
+    "@semantic-release/npm": "^13.2.0",
+    "@types/node": "^26.6.6",
+    "nock": "^15.0.6",
+    "prettier": "^3.10.1",
+    "semantic-release": "^26.0.1",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.10"
+    "vitest": "^5.1.0"
   },
-  "packageManager": "pnpm@11.8.0"
+  "packageManager": "pnpm@12.21.0+sha512.66fd8278ee28935ce951792d34367ff3af5c432a2756445823029533835b8da529bbe0be5130afd56ed0713fb8789e47bad82d93bd5ae2fe54b15562d6276ef0"
 }

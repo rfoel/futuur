@@ -1,52 +1,32 @@
-import CryptoJS from "crypto-js";
+import { createHmac } from "node:crypto";
+
 import nock from "nock";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
-import { Futuur } from "../src/client";
+import { Futuur, FutuurError } from "../src";
+import { pyStr } from "../src/signing";
 
 const BASE = "https://api.futuur.com";
 const PREFIX = "/v2.0";
 const PUBLIC_KEY = "test_public";
 const PRIVATE_KEY = "test_private";
 
-function signatureValue(value: unknown): string {
-  if (Array.isArray(value)) {
-    return value.every((v) => v === null || typeof v !== "object")
-      ? value.join(",")
-      : JSON.stringify(value);
-  }
-  if (typeof value === "object") return JSON.stringify(value);
-  return String(value);
-}
-
-/** Mirrors Python's `urlencode`, which is how the API builds its own signature. */
-function quotePlus(value: string): string {
-  return encodeURIComponent(value)
-    .replace(
-      /[!'()*]/g,
-      (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`,
-    )
-    .replace(/%20/g, "+");
-}
-
 /**
- * Every key given is signed. Omit a key to model a null query param, which never
- * reaches the wire; pass the string `"None"` to model a null body param, which
- * does.
+ * HMAC of the parameters the server signs, given as the exact text it renders
+ * for each value. Spelling the text out keeps these tests independent of the
+ * SDK's own conversion rules.
  */
-function expectedHmac(params: Record<string, unknown>): string {
-  const flat: Record<string, string> = {};
-  for (const [k, v] of Object.entries(params)) {
-    if (v === undefined) continue;
-    flat[k] = signatureValue(v);
-  }
-  const paramString = Object.keys(flat)
-    .sort()
-    .map((k) => `${quotePlus(k)}=${quotePlus(flat[k])}`)
-    .join("&");
-  return CryptoJS.HmacSHA512(paramString, PRIVATE_KEY).toString(
-    CryptoJS.enc.Hex,
-  );
+function expectedHmac(params: Record<string, string>): string {
+  const message = new URLSearchParams(
+    Object.keys(params)
+      .sort()
+      .map((k) => [k, params[k]]),
+  )
+    .toString()
+    // Python's urlencode escapes `*` and keeps `~`; URLSearchParams does the reverse.
+    .replace(/\*/g, "%2A")
+    .replace(/%7E/g, "~");
+  return createHmac("sha512", PRIVATE_KEY).update(message).digest("hex");
 }
 
 function makeSdk() {
@@ -77,203 +57,170 @@ afterAll(() => {
   nock.enableNetConnect();
 });
 
+/** Capture the request headers nock saw and reply with `body`. */
+function capture(status: number, body: unknown = {}) {
+  const seen: { headers: Record<string, string> } = { headers: {} };
+  // nock 15 hands reply functions the intercepted Fetch `Request`.
+  const reply = (req: Request) => {
+    seen.headers = Object.fromEntries(req.headers);
+    return [status, body] as [number, unknown];
+  };
+  return { seen, reply };
+}
+
 describe("Futuur auth headers", () => {
   it("attaches Key, Timestamp and HMAC headers", async () => {
-    const sdk = makeSdk();
-    let capturedHeaders: Record<string, string> = {};
+    const { seen, reply } = capture(200, { id: 1 });
+    api().get(`${PREFIX}/me/`).reply(reply);
 
-    api()
-      .get(`${PREFIX}/me/`)
-      .reply(function () {
-        capturedHeaders = this.req.headers as Record<string, string>;
-        return [200, { id: 1, username: "alice" }];
-      });
+    await makeSdk().me();
 
-    await sdk.me();
-
-    expect(capturedHeaders.key).toBe(PUBLIC_KEY);
-    expect(capturedHeaders.timestamp).toMatch(/^\d+$/);
-    expect(capturedHeaders.hmac).toMatch(/^[a-f0-9]{128}$/);
-
-    const ts = capturedHeaders.timestamp;
-    expect(capturedHeaders.hmac).toBe(
-      expectedHmac({ Key: PUBLIC_KEY, Timestamp: ts }),
+    expect(seen.headers.key).toBe(PUBLIC_KEY);
+    expect(seen.headers.timestamp).toMatch(/^\d+$/);
+    expect(seen.headers.hmac).toBe(
+      expectedHmac({ Key: PUBLIC_KEY, Timestamp: seen.headers.timestamp }),
     );
   });
 
-  it("includes query params in signature", async () => {
-    const sdk = makeSdk();
-    let capturedHeaders: Record<string, string> = {};
-
+  it("signs query params as the strings sent", async () => {
+    const { seen, reply } = capture(200, {
+      pagination: PAGINATION,
+      results: [],
+    });
     api()
       .get(`${PREFIX}/events/`)
       .query({ currency_mode: "play_money", live: "true", limit: "5" })
-      .reply(function () {
-        capturedHeaders = this.req.headers as Record<string, string>;
-        return [200, { pagination: PAGINATION, results: [] }];
-      });
+      .reply(reply);
 
-    await sdk.listEvents({
+    await makeSdk().listEvents({
       currency_mode: "play_money",
       live: true,
       limit: 5,
     });
 
-    const ts = capturedHeaders.timestamp;
-    expect(capturedHeaders.hmac).toBe(
+    expect(seen.headers.hmac).toBe(
       expectedHmac({
         Key: PUBLIC_KEY,
-        Timestamp: ts,
+        Timestamp: seen.headers.timestamp,
         currency_mode: "play_money",
-        live: true,
-        limit: 5,
+        live: "true",
+        limit: "5",
       }),
     );
   });
 
-  it("includes POST body in signature", async () => {
-    const sdk = makeSdk();
-    let capturedHeaders: Record<string, string> = {};
-
+  it("signs JSON body values the way Python's str() renders them", async () => {
     const body = {
       market: 4567,
       side: "bid" as const,
       currency: "USDC",
-      price: 0.62,
-      shares: 100,
+      price: 0.5,
+      shares: "100",
+      cancel_conflicting_orders: true,
+      expired_at: null,
     };
+    const { seen, reply } = capture(201, { id: 1 });
+    api().post(`${PREFIX}/orders/`, body).reply(reply);
 
-    api()
-      .post(`${PREFIX}/orders/`, body)
-      .reply(function () {
-        capturedHeaders = this.req.headers as Record<string, string>;
-        return [201, { id: 1, ...body, position: "long", status: "open" }];
-      });
+    await makeSdk().createOrder(body);
 
-    await sdk.createOrder(body);
-
-    const ts = capturedHeaders.timestamp;
-    expect(capturedHeaders.hmac).toBe(
-      expectedHmac({ Key: PUBLIC_KEY, Timestamp: ts, ...body }),
+    expect(seen.headers.hmac).toBe(
+      expectedHmac({
+        Key: PUBLIC_KEY,
+        Timestamp: seen.headers.timestamp,
+        market: "4567",
+        side: "bid",
+        currency: "USDC",
+        price: "0.5",
+        shares: "100",
+        cancel_conflicting_orders: "True",
+        expired_at: "None",
+      }),
     );
   });
 
   it("signs a space as + rather than %20", async () => {
-    const sdk = makeSdk();
-    let capturedHeaders: Record<string, string> = {};
-
+    const { seen, reply } = capture(200, {
+      pagination: PAGINATION,
+      results: [],
+    });
     api()
       .get(`${PREFIX}/events/`)
       .query({ search: "bitcoin hourly", limit: "5" })
-      .reply(function () {
-        capturedHeaders = this.req.headers as Record<string, string>;
-        return [200, { pagination: PAGINATION, results: [] }];
-      });
+      .reply(reply);
 
-    await sdk.listEvents({ search: "bitcoin hourly", limit: 5 });
+    await makeSdk().listEvents({ search: "bitcoin hourly", limit: 5 });
 
-    const ts = capturedHeaders.timestamp;
-    expect(capturedHeaders.hmac).toBe(
+    expect(seen.headers.hmac).toBe(
       expectedHmac({
         Key: PUBLIC_KEY,
-        Timestamp: ts,
+        Timestamp: seen.headers.timestamp,
         search: "bitcoin hourly",
-        limit: 5,
+        limit: "5",
       }),
     );
   });
 
-  it("signs a null body param as None", async () => {
-    const sdk = makeSdk();
-    let capturedHeaders: Record<string, string> = {};
+  it("leaves a null query param out of the request and the signature", async () => {
+    const { seen, reply } = capture(200, {
+      pagination: PAGINATION,
+      results: [],
+    });
+    api().get(`${PREFIX}/events/`).query({ limit: "5" }).reply(reply);
 
-    const body = {
-      market: 4567,
-      side: "bid" as const,
-      currency: "USDC",
-      price: null,
-      shares: 100,
-    };
-
-    api()
-      .post(`${PREFIX}/orders/`, body)
-      .reply(function () {
-        capturedHeaders = this.req.headers as Record<string, string>;
-        return [201, { id: 1, ...body, position: "long", status: "open" }];
-      });
-
-    await sdk.createOrder(body);
-
-    const ts = capturedHeaders.timestamp;
-    expect(capturedHeaders.hmac).toBe(
-      expectedHmac({ ...body, Key: PUBLIC_KEY, Timestamp: ts, price: "None" }),
-    );
-  });
-
-  it("leaves a null query param out of the signature", async () => {
-    const sdk = makeSdk();
-    let capturedHeaders: Record<string, string> = {};
-
-    api()
-      .get(`${PREFIX}/events/`)
-      .query({ limit: "5" })
-      .reply(function () {
-        capturedHeaders = this.req.headers as Record<string, string>;
-        return [200, { pagination: PAGINATION, results: [] }];
-      });
-
-    await sdk.listEvents({
+    await makeSdk().listEvents({
       limit: 5,
       search: null as unknown as string,
     });
 
-    const ts = capturedHeaders.timestamp;
-    expect(capturedHeaders.hmac).toBe(
-      expectedHmac({ Key: PUBLIC_KEY, Timestamp: ts, limit: 5 }),
-    );
-  });
-
-  it("joins array params with comma in signature", async () => {
-    const sdk = makeSdk();
-    let capturedHeaders: Record<string, string> = {};
-
-    api()
-      .get(`${PREFIX}/orders/`)
-      .query(true)
-      .reply(function () {
-        capturedHeaders = this.req.headers as Record<string, string>;
-        return [200, { pagination: PAGINATION, results: [] }];
-      });
-
-    await sdk.listOrders({ currencies: ["USDC", "USDT"] });
-
-    const ts = capturedHeaders.timestamp;
-    expect(capturedHeaders.hmac).toBe(
+    expect(seen.headers.hmac).toBe(
       expectedHmac({
         Key: PUBLIC_KEY,
-        Timestamp: ts,
-        currencies: ["USDC", "USDT"],
+        Timestamp: seen.headers.timestamp,
+        limit: "5",
       }),
     );
   });
 
-  it("serializes array query params as a comma-joined list", async () => {
-    const sdk = makeSdk();
+  it("sends and signs array query params as a comma-joined list", async () => {
+    const { seen, reply } = capture(200, {
+      pagination: PAGINATION,
+      results: [],
+    });
+    api()
+      .get(`${PREFIX}/orders/`)
+      .query({ currencies: "USDC,USDT" })
+      .reply(reply);
 
-    const scope = api()
-      .get(`${PREFIX}/events/`)
-      .query({ categories: "98,106", limit: "1" })
-      .reply(200, { pagination: PAGINATION, results: [] });
+    await makeSdk().listOrders({ currencies: ["USDC", "USDT"] });
 
-    await sdk.listEvents({ categories: [98, 106], limit: 1 });
-
-    expect(scope.isDone()).toBe(true);
+    expect(seen.headers.hmac).toBe(
+      expectedHmac({
+        Key: PUBLIC_KEY,
+        Timestamp: seen.headers.timestamp,
+        currencies: "USDC,USDT",
+      }),
+    );
   });
 
-  it("serializes nested body params as JSON in signature", async () => {
-    const sdk = makeSdk();
-    let capturedHeaders: Record<string, string> = {};
+  it("signs a body array as its Python repr", async () => {
+    const { seen, reply } = capture(200, []);
+    api()
+      .post(`${PREFIX}/orders/batch-cancel/`, { order_ids: [100, 101, 102] })
+      .reply(reply);
 
+    await makeSdk().batchCancelOrders({ order_ids: [100, 101, 102] });
+
+    expect(seen.headers.hmac).toBe(
+      expectedHmac({
+        Key: PUBLIC_KEY,
+        Timestamp: seen.headers.timestamp,
+        order_ids: "[100, 101, 102]",
+      }),
+    );
+  });
+
+  it("signs nested body objects as their Python repr", async () => {
     const orders = [
       {
         market: 2231,
@@ -282,42 +229,40 @@ describe("Futuur auth headers", () => {
         currency: "OOM",
         shares: "13",
         price: "0.43",
+        expired_at: null,
+        cancel_conflicting_orders: false,
       },
     ];
+    const { seen, reply } = capture(200, {
+      results: [],
+      cancelled_existing_order_ids: [],
+    });
+    api().post(`${PREFIX}/orders/batch/`, { orders }).reply(reply);
 
-    api()
-      .post(`${PREFIX}/orders/batch/`, { orders })
-      .reply(function () {
-        capturedHeaders = this.req.headers as Record<string, string>;
-        return [200, { results: [], cancelled_existing_order_ids: [] }];
-      });
+    await makeSdk().batchCreateOrders({ orders });
 
-    await sdk.batchCreateOrders({ orders });
-
-    const ts = capturedHeaders.timestamp;
-    expect(capturedHeaders.hmac).toBe(
-      expectedHmac({ Key: PUBLIC_KEY, Timestamp: ts, orders }),
+    expect(seen.headers.hmac).toBe(
+      expectedHmac({
+        Key: PUBLIC_KEY,
+        Timestamp: seen.headers.timestamp,
+        orders:
+          "[{'market': 2231, 'side': 'bid', 'position': 'long', 'currency': 'OOM', " +
+          "'shares': '13', 'price': '0.43', 'expired_at': None, " +
+          "'cancel_conflicting_orders': False}]",
+      }),
     );
   });
 
-  it("signs form-encoded bodies", async () => {
-    const sdk = makeSdk();
-    let capturedHeaders: Record<string, string> = {};
+  it("signs form-encoded bodies as sent", async () => {
+    const { seen, reply } = capture(200, { auth: "key:sig" });
+    api().post(`${PREFIX}/pusher/auth/`).reply(reply);
 
-    api()
-      .post(`${PREFIX}/pusher/auth/`)
-      .reply(function () {
-        capturedHeaders = this.req.headers as Record<string, string>;
-        return [200, { auth: "key:sig" }];
-      });
+    await makeSdk().pusherAuth("1234.5678", "private-user-1");
 
-    await sdk.pusherAuth("1234.5678", "private-user-1");
-
-    const ts = capturedHeaders.timestamp;
-    expect(capturedHeaders.hmac).toBe(
+    expect(seen.headers.hmac).toBe(
       expectedHmac({
         Key: PUBLIC_KEY,
-        Timestamp: ts,
+        Timestamp: seen.headers.timestamp,
         socket_id: "1234.5678",
         channel_name: "private-user-1",
       }),
@@ -325,22 +270,100 @@ describe("Futuur auth headers", () => {
   });
 
   it("sends Idempotency-Key when provided", async () => {
-    const sdk = makeSdk();
-    let capturedHeaders: Record<string, string> = {};
+    const { seen, reply } = capture(201, { id: 1 });
+    api().post(`${PREFIX}/orders/`).reply(reply);
 
-    api()
-      .post(`${PREFIX}/orders/`)
-      .reply(function () {
-        capturedHeaders = this.req.headers as Record<string, string>;
-        return [201, { id: 1 }];
-      });
-
-    await sdk.createOrder(
+    await makeSdk().createOrder(
       { market: 1, side: "bid", currency: "OOM", shares: 1 },
       { idempotencyKey: "abc-123" },
     );
 
-    expect(capturedHeaders["idempotency-key"]).toBe("abc-123");
+    expect(seen.headers["idempotency-key"]).toBe("abc-123");
+  });
+});
+
+describe("pyStr", () => {
+  it.each([
+    ["0.42", "0.42"],
+    [3, "3"],
+    [0.5, "0.5"],
+    [true, "True"],
+    [false, "False"],
+    [null, "None"],
+    [1e-5, "1e-05"],
+    [0.0001, "0.0001"],
+    [1.5e-7, "1.5e-07"],
+    [1e21, "1e+21"],
+    [1e16, "10000000000000000"],
+    [{ a: 1, b: [true, "x"] }, "{'a': 1, 'b': [True, 'x']}"],
+    [["it's"], `["it's"]`],
+    [[`it's "q"`], `['it\\'s "q"']`],
+    [["a\\b\n\t"], "['a\\\\b\\n\\t']"],
+    [["\u00a0\u2028\u0007"], "['\\xa0\\u2028\\x07']"],
+    [["ação 🎲"], "['ação 🎲']"],
+    [[], "[]"],
+    [{}, "{}"],
+  ])("renders %j as %s", (value, text) => {
+    expect(pyStr(value)).toBe(text);
+  });
+});
+
+describe("errors", () => {
+  it("throws FutuurError with the code from the standard envelope", async () => {
+    api()
+      .post(`${PREFIX}/orders/`)
+      .reply(403, {
+        type: "client_error",
+        errors: [
+          {
+            code: "MarketClosed",
+            detail: "Market is closed for trading.",
+            attr: null,
+          },
+        ],
+      });
+
+    const err = await makeSdk()
+      .createOrder({ market: 1, side: "bid", currency: "OOM", shares: 1 })
+      .catch((e) => e);
+
+    expect(err).toBeInstanceOf(FutuurError);
+    expect(err.status).toBe(403);
+    expect(err.code).toBe("MarketClosed");
+    expect(err.message).toContain("Market is closed for trading.");
+  });
+
+  it("reads the code of an on-chain order error from the attr=code entry", async () => {
+    api()
+      .post(`${PREFIX}/orders/`)
+      .reply(400, {
+        type: "validation_error",
+        errors: [
+          { code: "invalid", detail: "Nonce already used.", attr: "detail" },
+          { code: "invalid", detail: "order_intent_nonce_stale", attr: "code" },
+        ],
+      });
+
+    const err = await makeSdk()
+      .createOrder({ market: 1, side: "bid", currency: "OOM", shares: 1 })
+      .catch((e) => e);
+
+    expect(err.code).toBe("order_intent_nonce_stale");
+    expect(err.message).toContain("Nonce already used.");
+    expect(err.errors).toHaveLength(2);
+  });
+
+  it("keeps a plain detail body", async () => {
+    api().post(`${PREFIX}/pusher/auth/`).reply(403, { detail: "Forbidden." });
+
+    const err = await makeSdk()
+      .pusherAuth("1.2", "private-user-9")
+      .catch((e) => e);
+
+    expect(err.status).toBe(403);
+    expect(err.code).toBeUndefined();
+    expect(err.body).toEqual({ detail: "Forbidden." });
+    expect(err.message).toContain("Forbidden.");
   });
 });
 
@@ -375,12 +398,12 @@ describe("Futuur endpoints", () => {
 
   it("registerSafe() → POST /me/safe/", async () => {
     const sdk = makeSdk();
-    const body = { safe_address: "0xAbC123", chain_id: 137 };
+    const body = { safe_address: "0xAbC123", chain_id: 84532 };
     api()
       .post(`${PREFIX}/me/safe/`, body)
-      .reply(200, { id: 42, email: "a@b.com", wallet: {} });
-    const me = await sdk.registerSafe(body);
-    expect(me.id).toBe(42);
+      .reply(200, { address: "0xAbC123", deploy_status: "not_deployed" });
+    const safe = await sdk.registerSafe(body);
+    expect(safe.address).toBe("0xAbC123");
   });
 
   it("ranking() → GET /me/ranking/", async () => {
@@ -619,6 +642,89 @@ describe("Futuur endpoints", () => {
       .reply(200, { auth: "key:signature" });
     const r = await sdk.pusherAuth("1234.5678", "private-user-1");
     expect(r.auth).toBe("key:signature");
+  });
+
+  it("tradingStatus → GET /trading-status/", async () => {
+    api()
+      .get(`${PREFIX}/trading-status/`)
+      .reply(200, { trading_halted: false });
+    const r = await makeSdk().tradingStatus();
+    expect(r.trading_halted).toBe(false);
+  });
+
+  it("signingContext → POST /orders/signing-context/", async () => {
+    const body = {
+      market: "3801",
+      price: "0.42",
+      shares: "3",
+      currency: "OOM" as const,
+      position: "long" as const,
+      side: "bid" as const,
+    };
+    api()
+      .post(`${PREFIX}/orders/signing-context/`, body)
+      .reply(200, { nonce: 17, expiry: 1715126400, maxUsdcRaw: "1296540" });
+    const r = await makeSdk().signingContext(body);
+    expect(r.nonce).toBe(17);
+  });
+
+  it("getSafeWallet sends refresh=1", async () => {
+    api()
+      .get(`${PREFIX}/me/safe-wallet/`)
+      .query({ refresh: "1" })
+      .reply(200, { address: "0xSafe", deploy_status: "deployed" });
+    const r = await makeSdk().getSafeWallet({ refresh: true });
+    expect(r.deploy_status).toBe("deployed");
+  });
+
+  it("getSafeTradingStatus → GET /me/safe/trading-status/", async () => {
+    api()
+      .get(`${PREFIX}/me/safe/trading-status/`)
+      .query({ currency: "OOM" })
+      .reply(200, { enabled: true });
+    const r = await makeSdk().getSafeTradingStatus({ currency: "OOM" });
+    expect(r.enabled).toBe(true);
+  });
+
+  it("getUserOperationReceipt passes the hash", async () => {
+    api()
+      .get(`${PREFIX}/me/safe/user-operation-receipt/`)
+      .query({ user_operation_hash: "0xabc" })
+      .reply(200, {});
+    await expect(makeSdk().getUserOperationReceipt("0xabc")).resolves.toEqual(
+      {},
+    );
+  });
+
+  it("deriveApiKey posts to the preview host without HMAC headers", async () => {
+    const { seen, reply } = capture(200, {
+      id: 12,
+      public_key: "pub",
+      private_key: "priv",
+      user_id: 42,
+    });
+    nock("https://web3-phase-01-preview.staging.cloud.futuur.com")
+      .post("/v2.0/api-keys/derive/")
+      .reply(reply);
+    const r = await Futuur.deriveApiKey({
+      address: "0xOwner",
+      timestamp: 1712500000,
+      nonce: 0,
+      signature: "0xsig",
+    });
+    expect(r.public_key).toBe("pub");
+    expect(seen.headers.hmac).toBeUndefined();
+  });
+
+  it("baseUrl with a trailing slash is normalized", async () => {
+    const sdk = new Futuur({
+      publicKey: PUBLIC_KEY,
+      privateKey: PRIVATE_KEY,
+      baseUrl: "https://api.futuur.com/v2.0/",
+    });
+    api().get(`${PREFIX}/me/`).reply(200, { id: 3 });
+    const me = await sdk.me();
+    expect(me.id).toBe(3);
   });
 
   it("baseUrl override is honored", async () => {

@@ -4,6 +4,8 @@
 
 TypeScript SDK for the [Futuur API](https://docs.futuur.com) (v2.0). Type-safe access to events, markets, orders, and wagers.
 
+Zero runtime dependencies: requests go through the built-in `fetch` and are signed with Web Crypto, so it runs on Node.js 22+, Bun, Deno, and edge runtimes.
+
 Full API reference: [docs.futuur.com](https://docs.futuur.com).
 
 ## Installation
@@ -23,6 +25,7 @@ const sdk = new Futuur({
   publicKey: process.env.FUTUUR_PUBLIC_KEY!,
   privateKey: process.env.FUTUUR_PRIVATE_KEY!,
   timeout: 10000, // optional, default 10000ms
+  // fetch: customFetch, // optional, defaults to globalThis.fetch
 });
 ```
 
@@ -86,14 +89,33 @@ const rebates = await sdk.getRebates({ date: "2026-06-25" });
 ```typescript
 const open = await sdk.listOrders({ status: "open", side: "bid" });
 
-// Limit order
+// Limit order: rests on the book until filled or canceled (time_in_force "gtc")
 const limit = await sdk.createOrder({
   market: 4567,
   side: "bid",
   currency: "USDC",
-  price: 0.62,
-  shares: 100,
+  price: "0.62",
+  shares: "100",
   position: "long",
+});
+
+// Immediate-or-cancel: fills at 0.62 or better now, cancels the rest
+const ioc = await sdk.createOrder({
+  market: 4567,
+  side: "bid",
+  currency: "USDC",
+  price: "0.62",
+  shares: "100",
+  time_in_force: "ioc",
+});
+
+// Sell everything you hold on that market and position
+await sdk.createOrder({
+  market: 4567,
+  side: "ask",
+  currency: "USDC",
+  price: "0.60",
+  shares: "max",
 });
 
 // Market order (price = null)
@@ -108,9 +130,12 @@ const market = await sdk.createOrder({
 await sdk.cancelOrder(10482);
 ```
 
-`shares` is required on both forms. A body that carries only `amount` is rejected with
-`KeyError: 'shares'`, so size the order yourself — walk `getOrderBook` if you want to
-convert a budget into shares at a price you know will fill.
+`shares` is required on every order; `amount` is only an optional cross-check and does not
+size the order. To turn a budget into shares, walk `getOrderBook` for a price you know will fill.
+
+A new order usually comes back as `processing`: matching runs after the response. There is no
+endpoint for a single order, so read the final `status`, `shares_filled`, `average_price` and
+`proceeds` from `listOrders`. Only `open` orders can be canceled.
 
 Pass an idempotency key to make a retry safe:
 
@@ -121,6 +146,8 @@ await sdk.createOrder(body, { idempotencyKey: crypto.randomUUID() });
 ### Batch orders
 
 Batch endpoints accept 1–20 items and validate each one independently, so partial failures are normal — always inspect the per-item `success` flag.
+
+`batchCreateOrders` **replaces your quotes**: before the first item on a market is created, every open order you have on that event, market and currency is canceled, and the IDs come back in `cancelled_existing_order_ids`. `batchUpdateOrders` replaces each order with a new one that has a new `id`.
 
 ```typescript
 const created = await sdk.batchCreateOrders({
@@ -166,6 +193,46 @@ const pusher = new Pusher("9011f7eac38e825792d5", {
 pusher.subscribe("private-user-1");
 ```
 
+### On-chain trading (preview host)
+
+Futuur is moving collateral on-chain. Phase one runs on a preview host on Base Sepolia, where every `OOM` or `USDC` order must also carry an EIP-712 `LimitOrderIntent` signed by your Safe's owner wallet. Production does not accept these fields yet. See [Environment](https://docs.futuur.com/environment.md) and [Place an on-chain order](https://docs.futuur.com/guides/on-chain-first-order.md).
+
+The SDK does not hold your wallet key; sign the typed data with the library of your choice (viem shown here):
+
+```typescript
+import { Futuur, PREVIEW_BASE_URL } from "futuur";
+import { privateKeyToAccount } from "viem/accounts";
+
+const owner = privateKeyToAccount(process.env.OWNER_KEY as `0x${string}`);
+const sdk = new Futuur({ publicKey, privateKey, baseUrl: PREVIEW_BASE_URL });
+
+const status = await sdk.getSafeTradingStatus({ currency: "OOM" });
+if (!status.enabled) throw new Error("Enable trading for OOM first");
+
+// Run signing context → sign → create one order at a time per Safe.
+const order = {
+  market: "3801",
+  side: "bid",
+  position: "long",
+  price: "0.42",
+  shares: "3",
+  currency: "OOM",
+} as const;
+const ctx = await sdk.signingContext(order);
+const signature = await owner.signTypedData(ctx.eip712 as any);
+
+await sdk.createOrder({
+  ...order,
+  time_in_force: "ioc",
+  order_intent_signature: signature,
+  order_intent_expiry: ctx.expiry,
+  order_intent_nonce: ctx.nonce,
+  max_usdc_raw: ctx.maxUsdcRaw,
+});
+```
+
+HMAC keys can also be derived from the owner wallet with `Futuur.deriveApiKey(...)`, which is unauthenticated and defaults to the preview host. Market orders (`price: null`) and `shares: "max"` cannot be signed; use `time_in_force: "ioc"` with a price and an explicit share count.
+
 ## API Reference
 
 ### Constructor Options
@@ -176,6 +243,7 @@ pusher.subscribe("private-user-1");
 | `privateKey` | string | yes      | —                               |
 | `timeout`    | number | no       | `10000`                         |
 | `baseUrl`    | string | no       | `https://api.futuur.com/v2.0`   |
+| `fetch`      | function | no     | `globalThis.fetch`              |
 
 ### Methods
 
@@ -183,7 +251,6 @@ pusher.subscribe("private-user-1");
 | -------------------------------------- | --------------------------------- |
 | `me()`                                 | `GET /me/`                        |
 | `balances(params?)`                    | `GET /me/balances/`               |
-| `registerSafe(body)`                   | `POST /me/safe/`                  |
 | `ranking()`                            | `GET /me/ranking/`                |
 | `listEvents(params?)`                  | `GET /events/`                    |
 | `getEvent(id)`                         | `GET /events/{id}/`               |
@@ -203,7 +270,24 @@ pusher.subscribe("private-user-1");
 | `cancelOrder(id)`                      | `PATCH /orders/{id}/cancel/`      |
 | `batchCancelOrders(body)`              | `POST /orders/batch-cancel/`      |
 | `cancelAllOrders(body?)`               | `POST /orders/cancel-all/`        |
+| `tradingStatus()`                      | `GET /trading-status/`            |
 | `pusherAuth(socketId, channelName)`    | `POST /pusher/auth/`              |
+
+On-chain trading, phase-one preview host only:
+
+| Method                                 | Endpoint                                |
+| -------------------------------------- | --------------------------------------- |
+| `signingContext(body)`                 | `POST /orders/signing-context/`         |
+| `Futuur.deriveApiKey(body, config?)`   | `POST /api-keys/derive/`                |
+| `registerSafe(body)`                   | `POST /me/safe/` (wallet session only)  |
+| `getSafeWallet(params?)`               | `GET /me/safe-wallet/`                  |
+| `confirmSafeDeployed(body?)`           | `POST /me/safe/deployed/`               |
+| `getSafeTradingStatus(params?)`        | `GET /me/safe/trading-status/`          |
+| `enableTrading(body)`                  | `POST /me/safe/enable-trading/`         |
+| `sponsorUserOperation(body)`           | `POST /me/safe/sponsor-user-operation/` |
+| `submitUserOperation(body)`            | `POST /me/safe/submit-user-operation/`  |
+| `getUserOperationReceipt(hash, chain?)`| `GET /me/safe/user-operation-receipt/`  |
+| `bundlerRpc(body)`                     | `POST /me/safe/pimlico-rpc/`            |
 
 ### Pagination
 
@@ -221,30 +305,55 @@ pagination.next; // URL of the next page, or null
 
 The SDK signs every request with HMAC-SHA512 using your private key. Request headers `Key`, `Timestamp`, `HMAC` are added automatically. Never commit your private key — load it from env vars or a secrets manager.
 
-Query params (GET) and body params (POST) are folded into the signed parameter set, sorted alphabetically and URL-encoded. Nested bodies — the `orders` array on the batch endpoints — are serialized as JSON before signing.
+Query params and top-level body fields are folded into the signed parameter set, sorted by name in code-point order and URL-encoded. The server signs what it _parsed_, as Python renders it, and the SDK mirrors that:
 
-The encoding has to match the API's, which is Python's `urlencode`, so a space signs as `+` and `!'()*` are escaped. Null handling differs by location: a null query param never reaches the wire and is left out of the signature, while a null body param does reach the wire and signs as `None`. Getting either wrong yields `authentication_failed` — a 401 that reads like a credential problem but is really a signature one. `me()` takes no params, so if it succeeds while a parameterised call fails, the credentials are fine.
+- Query values sign as the strings sent; arrays go out as a comma-joined list. A null query param is left off the wire and out of the signature.
+- JSON body values sign as Python's `str()`: `true` → `True`, `null` → `None`, `0.50` → `0.5`, and nested objects and arrays (the batch `orders`, `order_ids`, `user_operation`) as their Python `repr`, e.g. `[100, 101]`.
+- Encoding follows Python's `urlencode`: a space signs as `+`, and `!'()*` are escaped.
 
-Rate limits are 2,000 requests/minute and 30,000/day per account; identical POSTs within 1 second are rejected as duplicates.
+Getting any of this wrong yields `authentication_failed` — a 401 that reads like a credential problem but is really a signature one. `me()` takes no params, so if it succeeds while a parameterised call fails, the credentials are fine. Sending decimals as strings (`price: "0.42"`) keeps the signed text exactly what you typed.
+
+Rate limits are 2,000 requests/minute and 1,000,000/day per account. Order creation (`createOrder`, `batchCreateOrders`, `batchUpdateOrders` combined) is limited to 30 requests/minute. See [Rate limits](https://docs.futuur.com/rate-limits.md).
 
 ## Error Handling
 
+Every non-2xx response throws a `FutuurError`:
+
 ```typescript
+import { FutuurError } from "futuur";
+
 try {
   await sdk.createOrder({
     market: 4567,
     side: "bid",
     currency: "USDC",
-    price: 0.62,
-    shares: 100,
+    price: "0.62",
+    shares: "100",
   });
 } catch (err) {
-  // axios error — inspect err.response?.data for API error code
-  console.error(err);
+  if (err instanceof FutuurError) {
+    err.status; // 403
+    err.code; // "MarketClosed"
+    err.errors; // [{ code, detail, attr }]
+    err.body; // raw response body
+  }
+  throw err;
 }
 ```
 
-Common API errors: `UserNotEnoughBalance`, `MarketClosed`, `OrderBookConflictingOrders`, `InvalidShares`, `InvalidHMACSignature`.
+For on-chain order errors, which the API reports as a two-entry `400`, `code` is the specific code (for example `order_intent_nonce_stale`). Timeouts reject with the runtime's `TimeoutError`.
+
+Common codes: `UserNotEnoughBalance`, `MarketClosed`, `OrderBookConflictingOrders`, `InvalidShares`, `LimitOrderBeingProcessing`, `authentication_failed`, `throttled`, `trading_halted`. The full list is in [Errors](https://docs.futuur.com/errors.md).
+
+## Migration from v2
+
+v3 drops axios and crypto-js and has no runtime dependencies.
+
+- Errors are `FutuurError` instead of `AxiosError`: read `err.status`, `err.code` and `err.body` instead of `err.response`.
+- Node.js 22 or newer is required (or any runtime with `fetch` and Web Crypto).
+- JSON bodies are signed with Python's rendering, so booleans and the arrays on `batchCancelOrders` and the batch endpoints now sign correctly.
+- `Order` matches the current API: `created` (not `created_at`), no `amount`, plus `shares_cancelled`, `average_price`, `proceeds`, `time_in_force` and settlement fields; `event` and `market` are nested objects unless the list is filtered by `event`.
+- `shares` is required on `createOrder`; `registerSafe` now returns the Safe wallet and only works from a wallet session.
 
 ## Migration from v1
 
@@ -253,8 +362,10 @@ v2 is a breaking rewrite around the new resource model (events / markets / order
 ## Development
 
 ```bash
-npm run build
-npm test
+pnpm install
+pnpm typecheck
+pnpm test
+pnpm build
 ```
 
 ## License
